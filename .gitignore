@@ -1,0 +1,47 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build artifacts and local databases
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+data/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+
+# Generated reports and debug output
+*_output*.txt
+**/test_results.txt
+debug_*.html
+*.csv
+report*.txt
+coverage_out.txt
+still_not_found.txt
+not_found_*.txt
+qa_*.txt
+estimate_output.txt
+
+# Captured research and debug inputs
+scripts/debug_html/
+scripts/extract_rockauto/*.html
+scripts/extract_rockauto/*_ctx.txt
+scripts/extract_rockauto/*_results.txt
+scripts/research_sources/*.html
+scripts/research_sources/*.txt
+scripts/scrape_rockauto/rockauto_collection.txt
+
+# OS-specific files
+.DS_Store
+Thumbs.db

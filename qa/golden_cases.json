@@ -1,0 +1,98 @@
+{
+  "vinCases": [
+    {
+      "vin": "KM8J33A46GU123456",
+      "referenceUrl": "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/KM8J33A46GU123456?format=json",
+      "expectedMake": "HYUNDAI",
+      "expectedModel": "Tucson",
+      "expectedModelYear": "2016",
+      "minVariants": 3,
+      "needsConfirmation": true
+    },
+    {
+      "vin": "KNDPMCAC4J7412345",
+      "referenceUrl": "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/KNDPMCAC4J7412345?format=json",
+      "expectedMake": "KIA",
+      "expectedModel": "Sportage",
+      "expectedModelYear": "2018",
+      "minVariants": 3,
+      "needsConfirmation": true,
+      "expectedRecallCampaign": "21V137000"
+    }
+  ],
+  "searchCases": [
+    {
+      "query": "97133",
+      "referenceUrl": "https://www.hyundaipartsdeal.com/genuine/hyundai-filter-air~97133-d3000.html",
+      "expectedArticles": ["97133-D3000"],
+      "minResults": 1,
+      "requireUniqueArticles": true
+    },
+    {
+      "query": "cabin air filter",
+      "vehicleId": 10001,
+      "referenceUrl": "https://www.hyundaipartsdeal.com/genuine/hyundai-filter-air~97133-d3000.html",
+      "expectedArticles": ["97133-D3000", "CUK 26 013"],
+      "excludedArticles": ["97113-D3000", "97115-D3000"],
+      "minResults": 2,
+      "requireUniqueArticles": true
+    },
+    {
+      "query": "oil filter",
+      "referenceUrl": "https://www.hyundaipartsdeal.com/genuine/hyundai-filter-assy-engine-oil~26300-35505.html",
+      "expectedArticles": ["26300-35505"],
+      "minResults": 1,
+      "requireUniqueArticles": true
+    },
+    {
+      "query": "26300-35505",
+      "referenceUrl": "https://www.hyundaipartsdeal.com/genuine/hyundai-filter-assy-engine-oil~26300-35505.html",
+      "expectedArticles": ["26300-35505"],
+      "expectedFirstArticle": "26300-35505",
+      "minResults": 1,
+      "requireUniqueArticles": true
+    }
+  ],
+  "detailCases": [
+    {
+      "legacyArticleId": 100307,
+      "vehicleId": 10001,
+      "requiredPlacementKinds": ["inferred", "catalog_group", "exact"],
+      "requiredReplacementTypes": ["shared_oem_reference"],
+      "requireProvenanceGaps": true
+    }
+  ],
+  "catalogCases": [
+    {
+      "vehicleId": 10001,
+      "minGroups": 1,
+      "expectedGroupNames": ["Cabin Filter & Blower"]
+    }
+  ],
+  "substitutionCases": [
+    {
+      "legacyArticleId": 100001,
+      "expectedArticle": "26300-35503",
+      "expectedDirection": "reported_related",
+      "expectedSourceKey": "legacy_discovered_substitutions"
+    }
+  ],
+  "recallCases": [
+    {
+      "make": "HYUNDAI",
+      "model": "TUCSON",
+      "year": 2016,
+      "referenceUrl": "https://api.nhtsa.gov/recalls/recallsByVehicle?make=HYUNDAI&model=TUCSON&modelYear=2016",
+      "minResults": 5,
+      "expectedCampaign": "20V543000"
+    },
+    {
+      "make": "KIA",
+      "model": "SPORTAGE",
+      "year": 2018,
+      "referenceUrl": "https://api.nhtsa.gov/recalls/recallsByVehicle?make=KIA&model=SPORTAGE&modelYear=2018",
+      "minResults": 3,
+      "expectedCampaign": "21V137000"
+    }
+  ]
+}

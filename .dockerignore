@@ -1,0 +1,27 @@
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Data (mounted as volume)
+data/
+
+# Frontend node_modules (rebuilt in Docker)
+frontend/node_modules/
+
+# Debug / report files
+debug_*.html
+*_output*.txt
+*.csv
+report*.txt
+coverage_out.txt
+still_not_found.txt
+not_found_*.txt
+qa_*.txt
+estimate_output.txt
+
+# OS junk
+.DS_Store
+Thumbs.db
