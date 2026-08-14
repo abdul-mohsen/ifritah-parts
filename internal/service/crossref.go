@@ -54,6 +54,7 @@ func (s *CrossRef) FindOEMNumbers(legacyArticleId int) ([]model.OEMReference, er
 
 	rows, err := logQuery(s.db, "CrossRef.FindOEMNumbers", query, legacyArticleId)
 	if err != nil {
+		return nil, fmt.Errorf("crossref OEM lookup: %w", err)
 	}
 	defer rows.Close()
 

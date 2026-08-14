@@ -143,6 +143,25 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 		SearchStrategy: "oem_crossref",
 	}
 
+	// ─── HK scope gate ────────────────────────────────────────────────
+	// Before running any online / dealer / supersession fallback, verify
+	// this even looks like a Hyundai/Kia OEM. If not, we short-circuit
+	// with an honest "not in scope" message — the app is documented as
+	// HK-only. Owned-catalog / cross-ref lookups only ever hold HK-scoped
+	// data anyway, so this check does not affect legitimate HK queries.
+	scope := IsHKOEM(oemNum)
+	if !scope.IsHK {
+		log.Printf("[SmartSearch.searchByOEM] REJECTED by HK-scope gate: %s", scope.Reason)
+		resp.SearchStrategy = "hk_scope_rejected"
+		resp.Warnings = append(resp.Warnings, scope.Reason)
+		if scope.SuggestedMake != "" {
+			resp.Warnings = append(resp.Warnings,
+				"Try the parts distributor for "+scope.SuggestedMake+" instead.")
+		}
+		resp.Total = 0
+		return resp, nil
+	}
+
 	// Step 1: CrossRef service (oem_search_index — indexed)
 	log.Printf("[SmartSearch.searchByOEM] STEP 1: CrossRef.FindByOEM")
 	refs, err := s.crossRef.FindByOEM(oemNum, limit)
@@ -247,6 +266,13 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 					if onlineResult.Description == "" {
 						continue
 					}
+					// Reject scraped UI chrome ("Sign up with", "Login",
+					// "Cookie Preferences", etc.) that would otherwise be
+					// surfaced as a 0.75-confidence part.
+					if IsJunkDescription(onlineResult.Description) {
+						log.Printf("[SmartSearch.searchByOEM] online result rejected as junk description: %q", onlineResult.Description)
+						continue
+					}
 					result := SmartResult{
 						Part: model.Part{
 							LegacyArticleId: 0,
@@ -284,6 +310,10 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 					resp.SearchStrategy = "online_partsouq_stripped"
 					for _, onlineResult := range onlineResults2 {
 						if onlineResult.Description == "" {
+							continue
+						}
+						if IsJunkDescription(onlineResult.Description) {
+							log.Printf("[SmartSearch.searchByOEM] online (stripped) result rejected as junk description: %q", onlineResult.Description)
 							continue
 						}
 						result := SmartResult{
@@ -335,7 +365,7 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 		log.Printf("[SmartSearch.searchByOEM] STEP 8: dealer lookup")
 		if s.dealerLookup != nil {
 			dealerResult := s.dealerLookup.LookupPart(oemNum)
-			if dealerResult != nil && dealerResult.Description != "" {
+			if dealerResult != nil && dealerResult.Description != "" && !IsJunkDescription(dealerResult.Description) {
 				log.Printf("dealer lookup found: %s → %s", oemNum, dealerResult.Description)
 				resp.SearchStrategy = "dealer_lookup"
 				result := SmartResult{
@@ -358,12 +388,15 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 				s.enrichAftermarket(resp)
 				return resp, nil
 			}
+			if dealerResult != nil && IsJunkDescription(dealerResult.Description) {
+				log.Printf("[SmartSearch.searchByOEM] dealer result rejected as junk description: %q", dealerResult.Description)
+			}
 		}
 
 		// Strategy 7: Reverse supersession — check if any cached part lists this as a substitution
 		log.Printf("[SmartSearch.searchByOEM] STEP 9: reverse supersession")
 		if s.onlineLookup != nil && s.onlineLookup.GetCache() != nil {
-			if superseded := s.onlineLookup.GetCache().FindBySubstitution(NormalizeOEM(oemNum)); superseded != nil {
+			if superseded := s.onlineLookup.GetCache().FindBySubstitution(NormalizeOEM(oemNum)); superseded != nil && !IsJunkDescription(superseded.Description) {
 				log.Printf("supersession found: %s → via %s", oemNum, superseded.PartNumber)
 				resp.SearchStrategy = "supersession_reverse"
 				result := SmartResult{

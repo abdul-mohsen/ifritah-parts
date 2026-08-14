@@ -29,7 +29,12 @@ RUN mkdir -p /app/data
 EXPOSE 8080
 ENV BIND_ADDR=0.0.0.0 \
     PORT=8080 \
-    DATA_DIR=/app/data \
-    CORS_ORIGINS=*
+    DATA_DIR=/app/data
+# Deployers MUST set CORS_ORIGINS to an explicit allowlist (e.g.
+# "https://ifritah.com,https://qa.ifritah.com"). We intentionally do NOT
+# default to `*` here: the Gin CORS handler is configured with
+# AllowCredentials=true, and the browser rejects that combination — worse,
+# gin-contrib/cors echoes the request Origin, allowing any site to make
+# credentialed requests.
 
 ENTRYPOINT ["./server"]
