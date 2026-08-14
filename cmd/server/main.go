@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -179,9 +180,29 @@ func main() {
 		r.StaticFile("/favicon.svg", filepath.Join(frontendDir, "favicon.svg"))
 		r.StaticFile("/icons.svg", filepath.Join(frontendDir, "icons.svg"))
 		r.NoRoute(func(c *gin.Context) {
+			// Never let /api/* fall through to the SPA — a JSON client
+			// expects a JSON 404, not an HTML dump. Only serve index.html
+			// for non-API routes so React Router can pick them up.
+			if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+				c.JSON(404, gin.H{
+					"error":  "not_found",
+					"path":   c.Request.URL.Path,
+					"method": c.Request.Method,
+				})
+				return
+			}
 			c.File(filepath.Join(frontendDir, "index.html"))
 		})
 		log.Printf("✓ Serving frontend from %s", frontendDir)
+	} else {
+		// No frontend built — still make /api/* return JSON 404s.
+		r.NoRoute(func(c *gin.Context) {
+			c.JSON(404, gin.H{
+				"error":  "not_found",
+				"path":   c.Request.URL.Path,
+				"method": c.Request.Method,
+			})
+		})
 	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddr, cfg.ServerPort)
