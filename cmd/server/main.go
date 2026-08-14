@@ -1,11 +1,11 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -22,10 +22,15 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Connect to MySQL (dev_ifritah) — non-fatal if unavailable
-	mysql := db.NewMySQL(cfg)
+	pg := db.NewPostgres(cfg)
+	var dataDBAvailable bool
+	if pg != nil {
+		dataDBAvailable = true
+		defer pg.Close()
+	} else {
+		log.Println("⚠ Running without PostgreSQL application data — only NHTSA decode + recalls will work")
+	}
 
-	// Determine data directory: env override or next to executable
 	var dataDir string
 	if cfg.DataDir != "" {
 		dataDir = cfg.DataDir
@@ -33,32 +38,21 @@ func main() {
 		exe, _ := os.Executable()
 		dataDir = filepath.Join(filepath.Dir(exe), "data")
 	}
-	// Determine active database: MySQL preferred, SQLite fallback for TecDoc queries
-	var activeDB *sql.DB
-	var offline bool
-	if mysql != nil {
-		activeDB = mysql
-		defer mysql.Close()
-	}
 
-	// Always open SQLite for local data (aftermarket_crossref, parts_cache, dealer_parts_index)
-	sqlitePath := filepath.Join(dataDir, "hk_parts.db")
-	sqliteDB := db.NewSQLite(sqlitePath)
-	if sqliteDB != nil {
-		defer sqliteDB.Close()
-		if activeDB == nil {
-			// No MySQL — use SQLite for everything
-			activeDB = sqliteDB
-			offline = true
-			log.Println("✓ Running in OFFLINE mode (SQLite)")
-		} else {
-			log.Println("✓ SQLite local DB loaded for aftermarket/cache data")
+	if pg != nil {
+		externalStore := service.NewExternalSourceStore(pg)
+		if externalStore != nil {
+			if err := externalStore.SeedCatalog(service.DefaultExternalSourceCatalog(), service.DefaultExternalSourceAssessments()); err != nil {
+				log.Printf("⚠ External source registry seed error (non-fatal): %v", err)
+			} else if counts, err := externalStore.CountSourcesByRecommendation(); err != nil {
+				log.Printf("⚠ External source registry count error (non-fatal): %v", err)
+			} else {
+				log.Printf("✓ External source registry ready: backend=%d research=%d rejected=%d",
+					counts["backend_enrichment"], counts["research_only"], counts["rejected"])
+			}
 		}
-	} else if activeDB == nil {
-		log.Println("⚠ Running without any parts database — only NHTSA decode + recalls will work")
 	}
 
-	// Init NHTSA vPIC SQLite decoder (optional — falls back to WMI if unavailable)
 	var nhtsaDec *nhtsa.Decoder
 	vpicPath := filepath.Join(dataDir, "vpic.lite.db")
 	if _, err := os.Stat(vpicPath); err == nil {
@@ -73,75 +67,47 @@ func main() {
 		log.Println("⚠ NHTSA vPIC DB not found at", vpicPath, "(falling back to WMI)")
 	}
 
-	// Init vehicle enricher (EPA, OpenVehicleDB, Arthurkao, CarQuery, FuelEconomy APIs)
 	vehicleEnricher := enrich.New(dataDir)
 	defer vehicleEnricher.Close()
 
-	// Init services
+	workerStore, err := service.NewWorkerStore(dataDir)
+	if err != nil {
+		log.Printf("⚠ Worker contribution store failed to load: %v", err)
+	} else {
+		defer workerStore.Close()
+		log.Printf("✓ Worker contribution store ready: %s", filepath.Join(dataDir, "worker_contributions.db"))
+	}
+
 	vinDecoder := service.NewVINDecoder(cfg.NHTSABaseURL, nhtsaDec, vehicleEnricher)
-	partsLookup := service.NewPartsLookup(activeDB, offline)
-	oemLookup := service.NewOEMLookup(activeDB)
-	supersession := service.NewSupersession(activeDB)
-	platform := service.NewPlatform(activeDB)
-	recalls := service.NewRecallsClient()
-	crossRef := service.NewCrossRef(activeDB, offline)
-	if sqliteDB != nil {
-		crossRef.SetLocalDB(sqliteDB)
-	}
+	partsLookup := service.NewPartsLookup(pg, false)
+	oemLookup := service.NewOEMLookup(pg)
+	supersession := service.NewSupersession(pg)
+	platform := service.NewPlatform(pg)
+	recalls := service.NewRecallsClient(cfg.NHTSARecallsURL)
+	crossRef := service.NewCrossRef(pg, false)
+	categoryTree := service.NewCategoryTree(pg, false)
+	alternatives := service.NewAlternatives(pg, false)
+	placementAdvisor := service.NewPlacementAdvisor(pg)
+	replacementAdvisor := service.NewReplacementAdvisor(crossRef, partsLookup, alternatives)
+	commonsMediaStore := service.NewCommonsMediaStore(pg)
 
-	// Engine resolver: motorCode resolution from vehicle linkage (display only)
-	var engineResolver *service.EngineResolver
-	if mysql != nil {
-		engineResolver = service.NewEngineResolver(mysql)
-		log.Println("✓ Engine resolver initialized (display only)")
-	}
-
-	// Category tree: hierarchical part catalog navigation
-	categoryTree := service.NewCategoryTree(activeDB, offline)
-
-	// Alternatives: functional equivalents via same genericArticleDesc
-	alternatives := service.NewAlternatives(activeDB, offline)
-
-	// Online lookup: PartsOuq scraper with SQLite cache
 	var partsCache *service.PartsCache
 	var onlineLookup *service.PartsOuqService
-	if sqliteDB != nil {
-		partsCache = service.NewPartsCache(sqliteDB)
-	}
 	onlineLookup = service.NewPartsOuqService(partsCache)
+	smartSearch := service.NewSmartSearch(pg, partsLookup, crossRef, oemLookup, platform, onlineLookup, false)
 
-	smartSearch := service.NewSmartSearch(activeDB, partsLookup, crossRef, oemLookup, platform, onlineLookup, offline)
-
-	// Dealer site lookup: fallback for parts not in TecDoc or PartsOuq
 	dealerLookup := service.NewDealerLookup(partsCache)
 	smartSearch.SetDealerLookup(dealerLookup)
 
-	// TecDoc full MySQL access (only when MySQL is connected)
-	var tecdocH *handler.TecDocHandler
-	var tecdoc *service.TecDoc
-	if mysql != nil {
-		tecdoc = service.NewTecDoc(mysql)
-		if tecdoc != nil {
-			smartSearch.SetTecDoc(tecdoc)
-			tecdocH = handler.NewTecDocHandler(tecdoc)
-			log.Println("✓ TecDoc full database connected — direct queries enabled")
-			tecdoc.LogStats()
-		}
-	}
-
 	vinCache := service.NewVINCache(1 * time.Hour)
 
-	// Init handlers
-	vinH := handler.NewVINHandler(vinDecoder, partsLookup, platform, recalls, vinCache, engineResolver)
+	vinH := handler.NewVINHandler(vinDecoder, partsLookup, platform, recalls, vinCache)
 	partsH := handler.NewPartsHandler(partsLookup, oemLookup)
-	if engineResolver != nil {
-		partsH.SetEngineResolver(engineResolver)
-	}
+	partsH.SetCrossRef(crossRef)
 	partsH.SetAlternatives(alternatives)
 	partsH.SetCategoryTree(categoryTree)
-	if tecdoc != nil {
-		partsH.SetTecDoc(tecdoc)
-	}
+	partsH.SetPlacementAdvisor(placementAdvisor)
+	partsH.SetReplacementAdvisor(replacementAdvisor)
 	oemH := handler.NewOEMHandler(oemLookup)
 	oemH.SetCrossRef(crossRef)
 	oemH.SetPartsLookup(partsLookup)
@@ -150,11 +116,10 @@ func main() {
 	searchH := handler.NewSearchHandler(smartSearch)
 	catalogH := handler.NewCatalogHandler(partsLookup, crossRef)
 	platformH := handler.NewPlatformHandler(platform, partsLookup)
+	workerH := handler.NewWorkerHandler(workerStore)
+	commonsMediaH := handler.NewCommonsMediaHandler(commonsMediaStore)
 
-	// Router
 	r := gin.Default()
-
-	// CORS — allow configured origins
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORSOrigins,
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
@@ -162,7 +127,6 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	// API routes
 	api := r.Group("/api")
 	{
 		api.POST("/vin/decode", vinH.Decode)
@@ -173,43 +137,40 @@ func main() {
 		api.GET("/vehicle/:id/platform", platformH.Siblings)
 		api.GET("/oem/:number", oemH.Lookup)
 		api.GET("/part/:id/chain", superH.GetChain)
+		api.GET("/part/:id/detail", partsH.Detail)
 		api.GET("/part/:id/vehicles", partsH.ReverseByArticle)
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/recalls", recallsH.ByVIN)
 		api.GET("/search", searchH.Search)
 
-		// Catalog browsing
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)
 		api.GET("/catalog/groups", catalogH.Groups)
 		api.GET("/catalog/parts", catalogH.GroupParts)
 
-		// TecDoc direct queries (only available when MySQL is connected)
-		if tecdocH != nil {
-			td := api.Group("/tecdoc")
-			td.GET("/specs/:id", tecdocH.Specs)
-			td.GET("/fitment", tecdocH.Fitment)
-			td.GET("/groups", tecdocH.Groups)
-			td.GET("/replacements/:id", tecdocH.Replacements)
-			td.GET("/vehicle/:id/parts", tecdocH.VehicleParts)
-			td.GET("/vehicle/:id/groups", tecdocH.VehicleGroups)
+		internal := api.Group("/internal/worker")
+		{
+			internal.POST("/replacements", workerH.SubmitReplacement)
+			internal.GET("/replacements", workerH.ListReplacements)
+			internal.POST("/replacements/:id/review", workerH.ReviewReplacement)
+		}
+		media := api.Group("/internal/media/commons")
+		{
+			media.POST("", commonsMediaH.Submit)
+			media.GET("", commonsMediaH.List)
+			media.POST("/:id/review", commonsMediaH.Review)
 		}
 	}
 
-	// Health check
 	r.GET("/health", func(c *gin.Context) {
-		mode := "mysql"
-		if offline {
-			mode = "sqlite_offline"
-		} else if activeDB == nil {
+		mode := "postgres"
+		if !dataDBAvailable {
 			mode = "no_database"
 		}
-		hasTecDoc := tecdocH != nil
-		c.JSON(200, gin.H{"status": "ok", "mode": mode, "tecdoc": hasTecDoc})
+		c.JSON(200, gin.H{"status": "ok", "mode": mode, "tecdoc": false})
 	})
 
-	// Serve frontend SPA (built dist/) if present
 	frontendDir := os.Getenv("FRONTEND_DIR")
 	if frontendDir == "" {
 		frontendDir = filepath.Join(dataDir, "..", "frontend", "dist")
@@ -219,9 +180,29 @@ func main() {
 		r.StaticFile("/favicon.svg", filepath.Join(frontendDir, "favicon.svg"))
 		r.StaticFile("/icons.svg", filepath.Join(frontendDir, "icons.svg"))
 		r.NoRoute(func(c *gin.Context) {
+			// Never let /api/* fall through to the SPA — a JSON client
+			// expects a JSON 404, not an HTML dump. Only serve index.html
+			// for non-API routes so React Router can pick them up.
+			if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+				c.JSON(404, gin.H{
+					"error":  "not_found",
+					"path":   c.Request.URL.Path,
+					"method": c.Request.Method,
+				})
+				return
+			}
 			c.File(filepath.Join(frontendDir, "index.html"))
 		})
 		log.Printf("✓ Serving frontend from %s", frontendDir)
+	} else {
+		// No frontend built — still make /api/* return JSON 404s.
+		r.NoRoute(func(c *gin.Context) {
+			c.JSON(404, gin.H{
+				"error":  "not_found",
+				"path":   c.Request.URL.Path,
+				"method": c.Request.Method,
+			})
+		})
 	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.BindAddr, cfg.ServerPort)

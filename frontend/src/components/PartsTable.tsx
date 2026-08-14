@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
-import type { Part } from '../types';
-import { getPartsForVehicle, getAlternatives } from '../api/client';
+import type { Part, PartDetailViewModel } from '../types';
+import { getPartDetail, getPartsForVehicle, getAlternatives } from '../api/client';
+import PartDetailModal from './PartDetailModal';
 import SupersessionChain from './SupersessionChain';
+import { createPartDetailViewModel, createPartDetailViewModelFromResponse } from '../utils/partDetail';
 
 // Extended part with optional enrichment fields from the backend
 interface EnrichedPart extends Part {
@@ -26,6 +28,9 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
   const [selectedArticle, setSelectedArticle] = useState<number | null>(null);
   const [expandedSpecs, setExpandedSpecs] = useState<number | null>(null);
   const [altCounts, setAltCounts] = useState<Record<number, number>>({});
+  const [selectedDetail, setSelectedDetail] = useState<PartDetailViewModel | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState('');
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -33,7 +38,7 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
     if (page === 1 && initialParts && !category) return;
     let cancelled = false;
     setLoading(true);
-    getPartsForVehicle(linkageTargetId, page, PAGE_SIZE, category, [], true)
+    getPartsForVehicle(linkageTargetId, page, PAGE_SIZE, category, true)
       .then((res) => {
         if (cancelled) return;
         setParts(res.parts as EnrichedPart[]);
@@ -43,7 +48,7 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [linkageTargetId, page, category]);
+  }, [linkageTargetId, page, category, initialParts]);
 
   // Fetch alternative counts for visible parts
   useEffect(() => {
@@ -58,11 +63,44 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
         })
         .catch(() => {});
     });
-  }, [parts, linkageTargetId]);
+  }, [parts, linkageTargetId, altCounts]);
 
   function handleCategoryChange(e: React.ChangeEvent<HTMLInputElement>) {
     setCategory(e.target.value);
     setPage(1);
+  }
+
+  async function openDetail(part: EnrichedPart) {
+    const fallback = createPartDetailViewModel({
+      legacyArticleId: part.legacyArticleId,
+      articleNumber: part.articleNumber,
+      description: part.description,
+      brandName: part.brandName,
+      category: part.category,
+      oemNumbers: part.oemNumbers,
+      criteria: part.criteria,
+      confidence: part.oemNumbers && part.oemNumbers.length > 0 ? 0.92 : 0.86,
+      confidenceReason: 'This part is linked to the selected vehicle through the owned catalog fitment path for the current linkage target.',
+      source: {
+        kind: 'owned_catalog',
+        label: 'Owned catalog fitment',
+        detail: 'The current view comes from the vehicle-linked parts catalog path already available in the app.',
+      },
+    });
+
+    setSelectedDetail(fallback);
+    setDetailLoading(true);
+    setDetailError('');
+
+    try {
+      const response = await getPartDetail(part.legacyArticleId, linkageTargetId);
+      setSelectedDetail(createPartDetailViewModelFromResponse(response));
+    } catch (error) {
+      setSelectedDetail(fallback);
+      setDetailError(error instanceof Error ? error.message : 'Failed to load part detail.');
+    } finally {
+      setDetailLoading(false);
+    }
   }
 
   return (
@@ -110,6 +148,7 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
                   key={p.legacyArticleId}
                   part={p}
                   altCount={altCounts[p.legacyArticleId]}
+                  onOpenDetail={() => openDetail(p)}
                   specsExpanded={expandedSpecs === p.legacyArticleId}
                   chainExpanded={selectedArticle === p.legacyArticleId}
                   onToggleSpecs={() =>
@@ -151,6 +190,17 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
           <SupersessionChain legacyArticleId={selectedArticle} />
         </div>
       )}
+
+      <PartDetailModal
+        detail={selectedDetail}
+        loading={detailLoading}
+        error={detailError}
+        onClose={() => {
+          setSelectedDetail(null);
+          setDetailLoading(false);
+          setDetailError('');
+        }}
+      />
     </div>
   );
 }
@@ -158,6 +208,7 @@ export default function PartsTable({ linkageTargetId, initialParts, totalParts }
 function PartRow({
   part: p,
   altCount,
+  onOpenDetail,
   specsExpanded,
   chainExpanded,
   onToggleSpecs,
@@ -165,6 +216,7 @@ function PartRow({
 }: {
   part: EnrichedPart;
   altCount?: number;
+  onOpenDetail: () => void;
   specsExpanded: boolean;
   chainExpanded: boolean;
   onToggleSpecs: () => void;
@@ -177,7 +229,9 @@ function PartRow({
     <>
       <tr className="hover:bg-blue-50 transition-colors">
         <td className="px-4 py-2">
-          <span className="font-mono">{p.articleNumber}</span>
+          <button onClick={onOpenDetail} className="font-mono text-left text-blue-700 hover:underline">
+            {p.articleNumber}
+          </button>
           {hasOEM && (
             <div className="mt-0.5">
               {p.oemNumbers!.slice(0, 2).map((oem) => (
@@ -192,10 +246,20 @@ function PartRow({
           )}
         </td>
         <td className="px-4 py-2">{p.brandName ?? '—'}</td>
-        <td className="px-4 py-2">{p.description}</td>
+        <td className="px-4 py-2">
+          <button onClick={onOpenDetail} className="text-left text-gray-900 hover:text-blue-700 hover:underline">
+            {p.description}
+          </button>
+        </td>
         <td className="px-4 py-2 text-xs text-gray-500">{p.category ?? '—'}</td>
         <td className="px-4 py-2">
           <div className="flex items-center gap-2">
+            <button
+              onClick={onOpenDetail}
+              className="text-xs text-slate-600 hover:text-slate-900 hover:underline"
+            >
+              Details
+            </button>
             {hasCriteria && (
               <button
                 onClick={onToggleSpecs}

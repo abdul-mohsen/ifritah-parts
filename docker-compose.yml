@@ -1,10 +1,36 @@
 version: "3.8"
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: parts-postgres
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-parts_engine}
+      POSTGRES_USER: ${PGUSER:-parts}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-parts_engine_pw}
+    ports:
+      - "${PGHOST_PORT:-55432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-parts} -d ${PGDATABASE:-parts_engine}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   parts-engine:
     build: .
     container_name: parts-engine
     env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${PGUSER:-parts}
+      PGPASSWORD: ${PGPASSWORD:-parts_engine_pw}
+      PGDATABASE: ${PGDATABASE:-parts_engine}
+      PGSSLMODE: disable
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     volumes:
@@ -12,6 +38,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-8080}/health"]
       interval: 30s
@@ -45,4 +74,6 @@ services:
 
 volumes:
   es-data:
+    driver: local
+  pg-data:
     driver: local

@@ -1,78 +1,56 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 
 	"parts-engine/internal/model"
+	"parts-engine/internal/store"
 )
 
-// Supersession follows replacement chains for a part.
+type substitutionLinkFinder interface {
+	ListSubstitutionLinksForArticle(context.Context, int32) ([]store.ListSubstitutionLinksForArticleRow, error)
+}
+
 type Supersession struct {
-	db *sql.DB
+	queries substitutionLinkFinder
 }
 
 func NewSupersession(db *sql.DB) *Supersession {
-	return &Supersession{db: db}
+	if db == nil {
+		return &Supersession{}
+	}
+	return &Supersession{queries: store.New(db)}
 }
 
-// GetChain returns the full supersession chain for a part (both directions).
-// In offline mode (SQLite), returns empty since supersession tables aren't exported.
 func (s *Supersession) GetChain(legacyArticleId int) ([]model.SupersessionLink, error) {
-	if s.db == nil {
+	if s.queries == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
-	var chain []model.SupersessionLink
 
-	// Forward: what replaces this part
-	fwd := `SELECT rba.legacyArticleId, rba.articleNumber, ab.brandName
-	        FROM replacedbyarticles rba
-	        LEFT JOIN articles a ON a.legacyArticleId = rba.legacyArticleId
-	        LEFT JOIN ambrand ab ON ab.brandId = a.mfrId AND ab.lang = 'en'
-	        WHERE rba.legacyArticleId = ?`
-
-	rows, err := s.db.Query(fwd, legacyArticleId)
+	rows, err := s.queries.ListSubstitutionLinksForArticle(context.Background(), int32(legacyArticleId))
 	if err != nil {
-		// Graceful fallback for SQLite (tables not exported)
-		return nil, nil
+		return nil, fmt.Errorf("list substitution links: %w", err)
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var link model.SupersessionLink
-		var brand sql.NullString
-		if err := rows.Scan(&link.LegacyArticleId, &link.ArticleNumber, &brand); err != nil {
-			return nil, fmt.Errorf("scan supersession: %w", err)
+	links := make([]model.SupersessionLink, 0, len(rows))
+	for _, row := range rows {
+		link := model.SupersessionLink{
+			ArticleNumber: row.ArticleNumber,
+			Description:   row.Description,
+			Direction:     row.Direction,
+			Confidence:    row.Confidence,
+			Source: model.ReplacementSource{
+				Kind:   row.SourceKey,
+				Label:  row.SourceLabel,
+				Detail: row.SourceDetail,
+			},
 		}
-		link.Direction = "replaced_by"
-		link.BrandName = brand.String
-		chain = append(chain, link)
-	}
-
-	// Backward: what this part replaces
-	bwd := `SELECT ra.legacyArticleId, ra.articleNumber, ab.brandName
-	        FROM replacesarticles ra
-	        LEFT JOIN articles a ON a.legacyArticleId = ra.legacyArticleId
-	        LEFT JOIN ambrand ab ON ab.brandId = a.mfrId AND ab.lang = 'en'
-	        WHERE ra.legacyArticleId = ?`
-
-	rows2, err := s.db.Query(bwd, legacyArticleId)
-	if err != nil {
-		// Graceful fallback for SQLite (tables not exported)
-		return chain, nil
-	}
-	defer rows2.Close()
-
-	for rows2.Next() {
-		var link model.SupersessionLink
-		var brand sql.NullString
-		if err := rows2.Scan(&link.LegacyArticleId, &link.ArticleNumber, &brand); err != nil {
-			return nil, fmt.Errorf("scan supersession: %w", err)
+		if row.SourceWarning != "" {
+			link.Warnings = []string{row.SourceWarning}
 		}
-		link.Direction = "replaces"
-		link.BrandName = brand.String
-		chain = append(chain, link)
+		links = append(links, link)
 	}
-
-	return chain, nil
+	return links, nil
 }

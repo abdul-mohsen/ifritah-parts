@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import { getCategoryTree, getPartsForVehicle } from '../api/client';
 import type { CategoryGroup, CategoryLeaf, Part } from '../types';
 
@@ -18,34 +18,79 @@ interface Props {
   onPartsLoaded?: (parts: Part[], total: number, category: string) => void;
 }
 
+interface CategoryState {
+  tree: CategoryGroup[];
+  expandedGroup: string | null;
+  selectedLeaf: string | null;
+  loading: boolean;
+}
+
+type CategoryAction =
+  | { type: 'loading' }
+  | { type: 'loaded'; tree: CategoryGroup[] }
+  | { type: 'failed' }
+  | { type: 'toggle-group'; groupName: string }
+  | { type: 'select-leaf'; leafName: string };
+
+const initialCategoryState: CategoryState = {
+  tree: [],
+  expandedGroup: null,
+  selectedLeaf: null,
+  loading: false,
+};
+
+function categoryReducer(state: CategoryState, action: CategoryAction): CategoryState {
+  switch (action.type) {
+    case 'loading':
+      return { ...state, expandedGroup: null, selectedLeaf: null, loading: true };
+    case 'loaded':
+      return { ...state, tree: action.tree, loading: false };
+    case 'failed':
+      return { ...state, tree: [], loading: false };
+    case 'toggle-group':
+      return {
+        ...state,
+        expandedGroup: state.expandedGroup === action.groupName ? null : action.groupName,
+      };
+    case 'select-leaf':
+      return { ...state, selectedLeaf: action.leafName };
+  }
+}
+
 export default function CategoryPicker({ linkageTargetId, onPartsLoaded }: Props) {
-  const [tree, setTree] = useState<CategoryGroup[]>([]);
-  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
-  const [selectedLeaf, setSelectedLeaf] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [state, dispatch] = useReducer(categoryReducer, initialCategoryState);
   const [filter, setFilter] = useState('');
 
   useEffect(() => {
     if (!linkageTargetId) return;
-    setLoading(true);
-    setSelectedLeaf(null);
-    setExpandedGroup(null);
+    let cancelled = false;
+    dispatch({ type: 'loading' });
     getCategoryTree(linkageTargetId)
-      .then((res) => setTree(res.tree || []))
-      .catch(() => setTree([]))
-      .finally(() => setLoading(false));
+      .then((res) => {
+        if (!cancelled) {
+          dispatch({ type: 'loaded', tree: res.tree || [] });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          dispatch({ type: 'failed' });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [linkageTargetId]);
 
   const handleGroupClick = (groupName: string) => {
-    setExpandedGroup(expandedGroup === groupName ? null : groupName);
+    dispatch({ type: 'toggle-group', groupName });
   };
 
   const handleLeafClick = async (leaf: CategoryLeaf) => {
-    setSelectedLeaf(leaf.name);
+    dispatch({ type: 'select-leaf', leafName: leaf.name });
     if (!onPartsLoaded) return;
 
     try {
-      const res = await getPartsForVehicle(linkageTargetId, 1, 50, leaf.name, [], true);
+      const res = await getPartsForVehicle(linkageTargetId, 1, 50, leaf.name, true);
       onPartsLoaded(res.parts, res.total, leaf.name);
     } catch {
       onPartsLoaded([], 0, leaf.name);
@@ -54,7 +99,7 @@ export default function CategoryPicker({ linkageTargetId, onPartsLoaded }: Props
 
   // Filter tree
   const filteredTree = filter
-    ? tree
+    ? state.tree
         .map((group) => ({
           ...group,
           categories: group.categories.filter((c) =>
@@ -62,13 +107,13 @@ export default function CategoryPicker({ linkageTargetId, onPartsLoaded }: Props
           ),
         }))
         .filter((g) => g.categories.length > 0)
-    : tree;
+    : state.tree;
 
-  if (loading) {
+  if (state.loading) {
     return <div className="text-gray-400 text-sm py-4">Loading categories...</div>;
   }
 
-  if (tree.length === 0) {
+  if (state.tree.length === 0) {
     return <div className="text-gray-400 text-sm py-4">No categories found for this vehicle.</div>;
   }
 
@@ -84,7 +129,7 @@ export default function CategoryPicker({ linkageTargetId, onPartsLoaded }: Props
 
       <div className="space-y-1">
         {filteredTree.map((group) => {
-          const isExpanded = expandedGroup === group.name || !!filter;
+          const isExpanded = state.expandedGroup === group.name || !!filter;
           const icon = ICONS[group.icon || 'other'] || '📦';
 
           return (
@@ -123,7 +168,7 @@ export default function CategoryPicker({ linkageTargetId, onPartsLoaded }: Props
                       key={leaf.name}
                       onClick={() => handleLeafClick(leaf)}
                       className={`w-full text-left px-6 py-2 text-sm transition-colors border-b border-gray-800 last:border-0 ${
-                        selectedLeaf === leaf.name
+                        state.selectedLeaf === leaf.name
                           ? 'bg-blue-700/30 text-blue-300'
                           : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
                       }`}

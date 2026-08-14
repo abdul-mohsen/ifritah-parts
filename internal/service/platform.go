@@ -1,22 +1,26 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 
 	"parts-engine/internal/model"
+	"parts-engine/internal/store"
 )
 
-// Platform provides Hyundai↔Kia cross-brand suggestions.
 type Platform struct {
-	db *sql.DB
+	db      *sql.DB
+	queries *store.Queries
 }
 
 func NewPlatform(db *sql.DB) *Platform {
-	return &Platform{db: db}
+	if db == nil {
+		return &Platform{}
+	}
+	return &Platform{db: db, queries: store.New(db)}
 }
 
-// Known platform pairs (hardcoded fallback when DB table is empty)
 var knownPlatforms = []struct {
 	hyundai  string
 	kia      string
@@ -34,59 +38,40 @@ var knownPlatforms = []struct {
 	{"KONA", "SELTOS", "OS/SP2"},
 	{"ACCENT", "RIO", "HC/YB"},
 	{"PALISADE", "TELLURIDE", "LX2/ON"},
-	{"I30", "CEED", "PD/CD"},
 	{"IONIQ 5", "EV6", "E-GMP"},
 	{"IONIQ 6", "EV6", "E-GMP"},
-	{"STARIA", "CARNIVAL", "US4/KA4"},
-	{"SANTA CRUZ", "SPORTAGE", "NX4"},
-	{"VELOSTER", "FORTE", "JS/BD"},
-	{"GENESIS GV70", "SPORTAGE", "JK1/NQ5"},
-	{"NEXO", "NIRO", "FE/DE"},
 }
 
-// FindSiblings returns cross-brand vehicle matches for a given model.
 func (s *Platform) FindSiblings(make, modelName string) ([]model.CrossBrandHit, error) {
-	// Try DB first
-	if s.db != nil {
+	if s.queries != nil {
 		hits, err := s.findSiblingsDB(make, modelName)
 		if err == nil && len(hits) > 0 {
 			return hits, nil
 		}
 	}
-
-	// Fallback to hardcoded pairs
 	return s.findSiblingsFallback(make, modelName), nil
 }
 
 func (s *Platform) findSiblingsDB(make, modelName string) ([]model.CrossBrandHit, error) {
-	var query string
-	var arg string
-
-	if make == "HYUNDAI" {
-		query = `SELECT 'KIA' AS sibling_make, kia_model AS sibling_model, platform_code
-		         FROM hk_platform_map WHERE UPPER(hyundai_model) = ?`
-		arg = modelName
-	} else if make == "KIA" {
-		query = `SELECT 'HYUNDAI' AS sibling_make, hyundai_model AS sibling_model, platform_code
-		         FROM hk_platform_map WHERE UPPER(kia_model) = ?`
-		arg = modelName
-	} else {
-		return nil, nil
-	}
-
-	rows, err := s.db.Query(query, arg)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+	ctx := context.Background()
 	var hits []model.CrossBrandHit
-	for rows.Next() {
-		var h model.CrossBrandHit
-		if err := rows.Scan(&h.SiblingMake, &h.SiblingModel, &h.Platform); err != nil {
+	switch strings.ToUpper(make) {
+	case "HYUNDAI":
+		rows, err := s.queries.FindPlatformSiblingsForHyundai(ctx, modelName)
+		if err != nil {
 			return nil, err
 		}
-		hits = append(hits, h)
+		for _, row := range rows {
+			hits = append(hits, model.CrossBrandHit{SiblingMake: row.SiblingMake, SiblingModel: row.SiblingModel, Platform: row.PlatformCode})
+		}
+	case "KIA":
+		rows, err := s.queries.FindPlatformSiblingsForKia(ctx, modelName)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			hits = append(hits, model.CrossBrandHit{SiblingMake: row.SiblingMake, SiblingModel: row.SiblingModel, Platform: row.PlatformCode})
+		}
 	}
 	return hits, nil
 }
@@ -94,20 +79,12 @@ func (s *Platform) findSiblingsDB(make, modelName string) ([]model.CrossBrandHit
 func (s *Platform) findSiblingsFallback(make, modelName string) []model.CrossBrandHit {
 	upper := strings.ToUpper(modelName)
 	var hits []model.CrossBrandHit
-
 	for _, p := range knownPlatforms {
-		if make == "HYUNDAI" && strings.EqualFold(p.hyundai, upper) {
-			hits = append(hits, model.CrossBrandHit{
-				SiblingMake:  "KIA",
-				SiblingModel: p.kia,
-				Platform:     p.platform,
-			})
-		} else if make == "KIA" && strings.EqualFold(p.kia, upper) {
-			hits = append(hits, model.CrossBrandHit{
-				SiblingMake:  "HYUNDAI",
-				SiblingModel: p.hyundai,
-				Platform:     p.platform,
-			})
+		if strings.EqualFold(make, "HYUNDAI") && strings.EqualFold(p.hyundai, upper) {
+			hits = append(hits, model.CrossBrandHit{SiblingMake: "KIA", SiblingModel: p.kia, Platform: p.platform})
+		}
+		if strings.EqualFold(make, "KIA") && strings.EqualFold(p.kia, upper) {
+			hits = append(hits, model.CrossBrandHit{SiblingMake: "HYUNDAI", SiblingModel: p.hyundai, Platform: p.platform})
 		}
 	}
 	return hits

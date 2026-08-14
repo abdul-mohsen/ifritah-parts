@@ -102,14 +102,14 @@ for s in schemas:
         AND e.Name IN ('Make', 'Model', 'Model Year', 'Body Class', 'Plant Country', 'Trim', 'Series')
     """, (schema_id,))
     patterns = c.fetchall()
-    
+
     # Try to match each pattern's Keys against VIN positions
     matched = {}
     for keys, elem_name, attr_id, lookup in patterns:
         # Keys format: position values like "4:A,5:A" or just "AA" at positions
         # Need to understand the Keys format
         pass
-    
+
     # Show raw patterns to understand Keys format
     c.execute("""
         SELECT p.Keys, e.Name, p.AttributeId

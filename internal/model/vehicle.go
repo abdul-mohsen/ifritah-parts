@@ -14,28 +14,17 @@ type Vehicle struct {
 	EndYearMonth    int    `json:"endYearMonth,omitempty"`
 }
 
-// EngineDetail describes a resolved TecDoc motor code for the vehicle.
-type EngineDetail struct {
-	MotorCode  string `json:"motorCode"`
-	CC         int    `json:"cc"`
-	FuelType   string `json:"fuelType,omitempty"`
-	Cylinders  int    `json:"cylinders,omitempty"`
-	PowerHP    int    `json:"powerHP,omitempty"`
-	PowerKW    int    `json:"powerKW,omitempty"`
-	EngineType string `json:"engineType,omitempty"`
-}
-
 // VINDecodeResult is the response from the VIN decode endpoint.
 type VINDecodeResult struct {
-	VIN        string          `json:"vin"`
-	Vehicle    *Vehicle        `json:"vehicle"`
-	Parts      []Part          `json:"parts,omitempty"`
-	CrossBrand []CrossBrandHit `json:"crossBrand,omitempty"`
-	Recalls    []Recall        `json:"recalls,omitempty"`
-	TotalParts int             `json:"totalParts"`
-	NHTSARaw   *NHTSAVehicle   `json:"nhtsaRaw,omitempty"`
-	MotorCodes []string        `json:"motorCodes,omitempty"`
-	Engines    []EngineDetail  `json:"engines,omitempty"`
+	VIN               string          `json:"vin"`
+	Vehicle           *Vehicle        `json:"vehicle"`
+	Parts             []Part          `json:"parts,omitempty"`
+	CrossBrand        []CrossBrandHit `json:"crossBrand,omitempty"`
+	Recalls           []Recall        `json:"recalls,omitempty"`
+	TotalParts        int             `json:"totalParts"`
+	NHTSARaw          *NHTSAVehicle   `json:"nhtsaRaw,omitempty"`
+	AllVariants       []Vehicle       `json:"allVariants,omitempty"`
+	NeedsConfirmation bool            `json:"needsConfirmation"`
 }
 
 // NHTSAVehicle is the vehicle info decoded from NHTSA vPIC API.

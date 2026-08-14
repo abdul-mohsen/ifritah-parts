@@ -15,7 +15,7 @@ for wmi in ['4T1', 'KMH', '1N4', '5J6', 'MHF']:
             print(f'WMI {wmi}: Id={r[0]}, MakeId={r[2]}, Make={r[3]}, MfrId={r[4]}')
     else:
         print(f'WMI {wmi}: NOT FOUND')
-    
+
     # Also check Wmi_Make for additional makes
     c.execute("""
         SELECT wm.WmiId, m.Name as Make

@@ -1,0 +1,29 @@
+{
+  "metricVersion": "quality-scorecard-v1",
+  "metricScope": "Metrics are calculated only from the externally referenced golden cases in qa/golden_cases.json; labeled false-positive and false-negative rates are not corpus-wide accuracy estimates.",
+  "limitations": [
+    "Search labels currently cover only a small set of positive, excluded, and ranked cases.",
+    "VIN fixtures require checksum-valid public replacements before VIN accuracy is treated as a release metric.",
+    "Duplicate-result rate counts returned article numbers, not all canonical OEM equivalence classes.",
+    "Cache checks validate retained response fields but do not yet prove TTL, upstream-outage, or concurrent-request behavior."
+  ],
+  "checksPassed": 18,
+  "checksFailed": 0,
+  "provenanceCompleteness": 0,
+  "placementWarningCompleteness": 1,
+  "replacementEvidenceCompleteness": 1,
+  "dedupePassRate": 1,
+  "vinDecodePassRate": 1,
+  "searchSafetyPassRate": 1,
+  "substitutionEvidencePassRate": 1,
+  "recallEvidencePassRate": 1,
+  "provenanceDisclosureAccuracy": 1,
+  "systemQualityScore": 0.8888888888888888,
+  "expectedHitRecall": 1,
+  "trueNegativePassRate": 1,
+  "falsePositiveRate": 0,
+  "falseNegativeRate": 0,
+  "duplicateResultRate": 0,
+  "meanReciprocalRank": 1,
+  "meanResultsPerSearch": 4
+}

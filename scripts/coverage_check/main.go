@@ -63,14 +63,14 @@ func main() {
 	rows2.Close()
 
 	var uncovered int
-	db.QueryRow(`SELECT COUNT(DISTINCT o.raw_number) FROM oem_search_index o 
-		WHERE NOT EXISTS (SELECT 1 FROM aftermarket_crossref a 
+	db.QueryRow(`SELECT COUNT(DISTINCT o.raw_number) FROM oem_search_index o
+		WHERE NOT EXISTS (SELECT 1 FROM aftermarket_crossref a
 		WHERE LOWER(REPLACE(a.oem_number,'-','')) = LOWER(REPLACE(o.raw_number,'-','')))`).Scan(&uncovered)
 	fmt.Printf("\nOEM parts WITHOUT aftermarket: %d / %d\n", uncovered, totalParts)
 
 	// Categories in main parts cache
-	rows3, err3 := db.Query(`SELECT assemblyGroupName, COUNT(DISTINCT legacyArticleId) 
-		FROM hk_parts_cache GROUP BY assemblyGroupName 
+	rows3, err3 := db.Query(`SELECT assemblyGroupName, COUNT(DISTINCT legacyArticleId)
+		FROM hk_parts_cache GROUP BY assemblyGroupName
 		ORDER BY COUNT(DISTINCT legacyArticleId) DESC LIMIT 30`)
 	if err3 == nil && rows3 != nil {
 		fmt.Println("\nOEM parts by assembly group (top 30):")
@@ -86,7 +86,7 @@ func main() {
 	}
 
 	// Vehicle models supported
-	rows4, err4 := db.Query(`SELECT nhtsa_make, nhtsa_model, COUNT(DISTINCT linkageTargetId) 
+	rows4, err4 := db.Query(`SELECT nhtsa_make, nhtsa_model, COUNT(DISTINCT linkageTargetId)
 		FROM vehicle_lookup GROUP BY nhtsa_make, nhtsa_model ORDER BY nhtsa_make, nhtsa_model`)
 	if err4 == nil && rows4 != nil {
 		fmt.Println("\nVehicle models & variants:")
@@ -116,7 +116,7 @@ func main() {
 
 	// How many of our aftermarket categories are common service/wear parts?
 	var servicePartOEMs int
-	db.QueryRow(`SELECT COUNT(DISTINCT oem_number) FROM aftermarket_crossref 
+	db.QueryRow(`SELECT COUNT(DISTINCT oem_number) FROM aftermarket_crossref
 		WHERE category IN ('Oil Filter','Air Filter','Cabin Filter','Fuel Filter',
 		'Brake Pads','Brake Disc','Spark Plug','Ignition Coil','Engine Mount',
 		'Shock Absorber','Radiator','Water Pump','Alternator','Starter Motor',
