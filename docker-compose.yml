@@ -1,52 +1,53 @@
-version: "3.8"
+# Parts Engine — single-container Compose file.
+#
+# The default `parts-engine` service is a SINGLE container that bundles
+# Postgres + the Go server + the built React frontend. The Docker volume
+# `pg-data` persists Postgres data across restarts; if you want a completely
+# fresh DB, `docker compose down -v` will wipe it.
+#
+# The optional `elastic` profile still boots Elasticsearch + Kibana for
+# TecDoc search experiments — enabled with `docker compose --profile elastic up`.
 
 services:
-  postgres:
-    image: postgres:17-alpine
-    container_name: parts-postgres
-    environment:
-      POSTGRES_DB: ${PGDATABASE:-parts_engine}
-      POSTGRES_USER: ${PGUSER:-parts}
-      POSTGRES_PASSWORD: ${PGPASSWORD:-parts_engine_pw}
-    ports:
-      - "${PGHOST_PORT:-55432}:5432"
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-parts} -d ${PGDATABASE:-parts_engine}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   parts-engine:
     build: .
     container_name: parts-engine
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
-      PGHOST: postgres
+      # These need to be present for the embedded postgres init. If .env
+      # overrides them, .env wins (env_file is evaluated first).
+      PGHOST: 127.0.0.1
       PGPORT: 5432
       PGUSER: ${PGUSER:-parts}
       PGPASSWORD: ${PGPASSWORD:-parts_engine_pw}
       PGDATABASE: ${PGDATABASE:-parts_engine}
       PGSSLMODE: disable
+      POSTGRES_USER: ${PGUSER:-parts}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-parts_engine_pw}
+      POSTGRES_DB: ${PGDATABASE:-parts_engine}
     ports:
-      - "${PORT:-8080}:${PORT:-8080}"
+      - "${PORT:-8080}:8080"
+      # Expose the embedded postgres for direct SQL access (psql, DBeaver, sqlc gen).
+      # Remove this line if you want the DB purely internal.
+      - "${PGHOST_PORT:-55432}:5432"
     volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Read-only seed data (SQLite hk_parts.db, vpic.lite.db, EPA data, etc.)
       - ./data:/app/data:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-8080}/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 30s
 
+  # Optional Elasticsearch + Kibana for TecDoc search experimentation.
+  # Enabled only with `docker compose --profile elastic up`.
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
     container_name: parts-es
@@ -73,7 +74,7 @@ services:
       - elasticsearch
 
 volumes:
-  es-data:
-    driver: local
   pg-data:
+    driver: local
+  es-data:
     driver: local

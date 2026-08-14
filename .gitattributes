@@ -1,0 +1,8 @@
+# Enforce LF line endings for anything that runs in Linux containers.
+# Without this, Git's autocrlf-on-Windows would rewrite entrypoint.sh with
+# CRLF and busybox `sh` in the postgres:17-alpine image would fail with
+# "not found" on the shebang.
+
+*.sh          text eol=lf
+Dockerfile    text eol=lf
+*.dockerfile  text eol=lf
