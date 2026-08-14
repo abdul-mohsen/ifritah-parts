@@ -43,10 +43,11 @@ RUN go build -ldflags="-s -w" -o /out/server ./cmd/server && \
 # ── Stage 3: Runtime — Postgres + Server + SPA ──────────
 FROM postgres:17-alpine
 
-# ca-certificates → outbound HTTPS to NHTSA
-# tzdata          → correct timestamps in recall / log output
-# curl            → HEALTHCHECK
-RUN apk add --no-cache ca-certificates tzdata curl
+# postgres:17-alpine ships with:
+#   - ca-certificates.crt at /etc/ssl/certs/ (for outbound HTTPS to NHTSA)
+#   - tzdata pre-installed
+#   - busybox wget at /usr/bin/wget (used for HEALTHCHECK)
+# No apk add needed.
 
 WORKDIR /app
 
@@ -92,6 +93,6 @@ ENV BIND_ADDR=0.0.0.0 \
 EXPOSE 8080 5432
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s \
-    CMD curl -fsS http://127.0.0.1:8080/health || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
