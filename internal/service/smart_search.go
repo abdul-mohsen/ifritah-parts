@@ -173,9 +173,38 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 		return resp, nil
 	}
 
+	// Track merged OEM references across all sources. Declared here so the
+	// MySQL/TecDoc STEP 0 short-circuit can populate it before the local
+	// CrossRef step runs.
+	var refs []model.OEMReference
+	var err error
+	var oemResult *model.OEMSearchResult // hoisted past `goto buildResults`
+
+	// Step 0: MySQL/TecDoc — the source of truth for HK parts.
+	// The 21.5M-row oem_number table + articlesvehicletrees join is the
+	// authoritative catalog. Local Postgres + SQLite are enrichment caches,
+	// not the authority. When MySQL is reachable we consult it FIRST and
+	// merge its refs into the result set; local sources still contribute
+	// but never override a MySQL hit for the same article.
+	if s.tecdoc != nil {
+		log.Printf("[SmartSearch.searchByOEM] STEP 0: TecDoc.SearchByOEM (MySQL — source of truth)")
+		tdRefs, tdErr := s.tecdoc.SearchByOEM(oemNum, limit)
+		if tdErr != nil {
+			log.Printf("[SmartSearch.searchByOEM] STEP 0 ERROR (non-fatal, falling back to local): %v", tdErr)
+		} else if len(tdRefs) > 0 {
+			log.Printf("[SmartSearch.searchByOEM] STEP 0 HIT: TecDoc returned %d refs (elapsed=%v)", len(tdRefs), time.Since(start))
+			resp.SearchStrategy = "tecdoc_oem"
+			// Return TecDoc results immediately — local cache queries below
+			// would only duplicate them. Aftermarket cross-refs still get
+			// added via enrichAftermarket() after the buildResults section.
+			refs = tdRefs
+			goto buildResults
+		}
+	}
+
 	// Step 1: CrossRef service (oem_search_index — indexed)
 	log.Printf("[SmartSearch.searchByOEM] STEP 1: CrossRef.FindByOEM")
-	refs, err := s.crossRef.FindByOEM(oemNum, limit)
+	refs, err = s.crossRef.FindByOEM(oemNum, limit)
 	if err != nil {
 		log.Printf("[SmartSearch.searchByOEM] STEP 1 ERROR: %v (elapsed=%v)", err, time.Since(start))
 		return nil, err
@@ -184,7 +213,7 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 
 	// Step 2: Also check oem_search_index
 	log.Printf("[SmartSearch.searchByOEM] STEP 2: OEMLookup.Search")
-	oemResult, _ := s.oem.Search(oemNum, limit)
+	oemResult, _ = s.oem.Search(oemNum, limit)
 	if oemResult != nil {
 		log.Printf("[SmartSearch.searchByOEM] STEP 2 DONE: %d results (elapsed=%v)", len(oemResult.Results), time.Since(start))
 		for _, r := range oemResult.Results {
@@ -642,6 +671,39 @@ func (s *SmartSearch) searchByArticle(artNum string, linkageTargetId, vehicleCC,
 		SearchStrategy: "article_lookup",
 	}
 
+	// Step 0: MySQL/TecDoc — the oem_number index is authoritative for
+	// article-number lookups too (an aftermarket article-number often
+	// exists in the same 21.5M-row index under source_table=articles).
+	if s.tecdoc != nil {
+		tdRefs, tdErr := s.tecdoc.SearchByOEM(artNum, limit)
+		if tdErr == nil && len(tdRefs) > 0 {
+			log.Printf("[SmartSearch.searchByArticle] STEP 0 HIT: TecDoc returned %d refs", len(tdRefs))
+			resp.SearchStrategy = "tecdoc_article"
+			for _, ref := range tdRefs {
+				rule := ClassifyCategory(ref.Description)
+				resp.Results = append(resp.Results, SmartResult{
+					Part: model.Part{
+						LegacyArticleId: ref.LegacyArticleId,
+						ArticleNumber:   ref.ArticleNumber,
+						Description:     ref.Description,
+						BrandName:       ref.BrandName,
+					},
+					Confidence:     0.85,
+					ConfidenceNote: "TecDoc article lookup (MySQL source of truth)",
+					FitmentDriver:  driverName(rule.Driver),
+					BrandResolved:  ref.BrandName,
+					OEMNumbers:     []model.OEMReference{ref},
+				})
+			}
+			resp.Total = len(resp.Results)
+			s.enrichAftermarket(resp)
+			return resp, nil
+		}
+		if tdErr != nil {
+			log.Printf("[SmartSearch.searchByArticle] STEP 0 ERROR (falling back to local): %v", tdErr)
+		}
+	}
+
 	normalized := strings.ToUpper(strings.TrimSpace(artNum))
 
 	rows, err := s.queries.SearchByArticleNumber(context.Background(), store.SearchByArticleNumberParams{
@@ -806,6 +868,27 @@ func (s *SmartSearch) searchByVehicle(textFilter string, linkageTargetId, vehicl
 		Query:          textFilter,
 		SearchStrategy: "vehicle_smart",
 	}
+
+	// Step 0: MySQL/TecDoc parts-for-vehicle — source of truth. When TecDoc
+	// is wired and the vehicle is known, its articlesvehicletrees join is
+	// authoritative. We consult it FIRST; if empty or unavailable, we fall
+	// through to the local Postgres store below.
+	if s.tecdoc != nil && linkageTargetId > 0 {
+		tdParts, tdTotal, tdErr := s.tecdoc.PartsForVehicle(linkageTargetId, category, page, limit)
+		if tdErr == nil && len(tdParts) > 0 {
+			log.Printf("[SmartSearch.searchByVehicle] STEP 0 HIT: TecDoc returned %d/%d parts for vehicle=%d",
+				len(tdParts), tdTotal, linkageTargetId)
+			resp.SearchStrategy = "tecdoc_vehicle"
+			resp.Results = tdParts
+			resp.Total = tdTotal
+			s.enrichAftermarket(resp)
+			return resp, nil
+		}
+		if tdErr != nil {
+			log.Printf("[SmartSearch.searchByVehicle] STEP 0 ERROR (falling back to local): %v", tdErr)
+		}
+	}
+
 	normalizedFilter := normalizeTextSearchQuery(textFilter)
 
 	offset := (page - 1) * limit
@@ -879,6 +962,40 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 		Query:          text,
 		SearchStrategy: "text_search",
 	}
+
+	// Step 0: MySQL/TecDoc keyword search — source of truth. Consult FIRST.
+	// Falls through to the local Postgres text index if TecDoc is not wired
+	// or returns nothing.
+	if s.tecdoc != nil {
+		tdRefs, tdErr := s.tecdoc.SearchByKeyword(text, limit)
+		if tdErr == nil && len(tdRefs) > 0 {
+			log.Printf("[SmartSearch.searchByText] STEP 0 HIT: TecDoc keyword returned %d refs", len(tdRefs))
+			resp.SearchStrategy = "tecdoc_keyword"
+			for _, ref := range tdRefs {
+				rule := ClassifyCategory(ref.Description)
+				resp.Results = append(resp.Results, SmartResult{
+					Part: model.Part{
+						LegacyArticleId: ref.LegacyArticleId,
+						ArticleNumber:   ref.ArticleNumber,
+						Description:     ref.Description,
+						BrandName:       ref.BrandName,
+					},
+					Confidence:     0.65,
+					ConfidenceNote: "TecDoc keyword search (MySQL source of truth)",
+					FitmentDriver:  driverName(rule.Driver),
+					BrandResolved:  ref.BrandName,
+					OEMNumbers:     []model.OEMReference{ref},
+				})
+			}
+			resp.Total = len(resp.Results)
+			s.enrichAftermarket(resp)
+			return resp, nil
+		}
+		if tdErr != nil {
+			log.Printf("[SmartSearch.searchByText] STEP 0 ERROR (falling back to local): %v", tdErr)
+		}
+	}
+
 	offset := (page - 1) * limit
 	normalizedText := normalizeTextSearchQuery(text)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

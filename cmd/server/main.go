@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 
 	"parts-engine/internal/config"
 	"parts-engine/internal/db"
@@ -20,6 +21,21 @@ import (
 )
 
 func main() {
+	// Auto-load .env from the current working directory (and its parents up to
+	// the module root) BEFORE config.Load reads env vars. Missing .env is not
+	// an error — the app boots off pure OS environment variables in that case.
+	// This matches how the docs describe the run recipe: "edit .env, run
+	// ./server" — without godotenv the Go binary would ignore .env entirely
+	// (unlike Node/Python which auto-load).
+	for _, candidate := range []string{".env", "../.env", "../../.env"} {
+		if _, err := os.Stat(candidate); err == nil {
+			if err := godotenv.Load(candidate); err == nil {
+				log.Printf("✓ Loaded env from %s", candidate)
+				break
+			}
+		}
+	}
+
 	cfg := config.Load()
 
 	pg := db.NewPostgres(cfg)
@@ -29,6 +45,15 @@ func main() {
 		defer pg.Close()
 	} else {
 		log.Println("⚠ Running without PostgreSQL application data — only NHTSA decode + recalls will work")
+	}
+
+	// Optional MySQL/TecDoc connection. Skipped when MYSQL_HOST is empty (the
+	// default for local dev + CI). When enabled, the TecDoc service adapter is
+	// initialised and the SmartSearch cascade gains its 21.5M-row cross-reference
+	// index. See internal/service/tecdoc.go for the actual query surface.
+	mysql := db.NewMySQL(cfg)
+	if mysql != nil {
+		defer mysql.Close()
 	}
 
 	var dataDir string
@@ -99,6 +124,22 @@ func main() {
 	dealerLookup := service.NewDealerLookup(partsCache)
 	smartSearch.SetDealerLookup(dealerLookup)
 
+	// When MySQL is connected, wire the full TecDoc reader into SmartSearch.
+	// The SmartSearch cascade uses TecDoc as an early-hit strategy for OEM
+	// searches that miss the local Postgres cache — the source-of-truth for
+	// the 21.5M-row oem_number and 651M-row articlesvehicletrees data.
+	var tecdocEnabled bool
+	var tecdoc *service.TecDoc
+	if mysql != nil {
+		tecdoc = service.NewTecDoc(mysql)
+		if tecdoc != nil {
+			smartSearch.SetTecDoc(tecdoc)
+			tecdocEnabled = true
+			log.Println("✓ TecDoc reader attached to SmartSearch (via MySQL)")
+			tecdoc.LogStats()
+		}
+	}
+
 	vinCache := service.NewVINCache(1 * time.Hour)
 
 	vinH := handler.NewVINHandler(vinDecoder, partsLookup, platform, recalls, vinCache)
@@ -108,6 +149,10 @@ func main() {
 	partsH.SetCategoryTree(categoryTree)
 	partsH.SetPlacementAdvisor(placementAdvisor)
 	partsH.SetReplacementAdvisor(replacementAdvisor)
+	// TecDoc-first for /api/vehicle/:id/parts + /api/part/:id/detail when MySQL is connected.
+	if tecdoc != nil {
+		partsH.SetTecDoc(tecdoc)
+	}
 	oemH := handler.NewOEMHandler(oemLookup)
 	oemH.SetCrossRef(crossRef)
 	oemH.SetPartsLookup(partsLookup)
@@ -120,11 +165,23 @@ func main() {
 	commonsMediaH := handler.NewCommonsMediaHandler(commonsMediaStore)
 
 	r := gin.Default()
+
+	// CORS — allow configured origins. A wildcard origin combined with
+	// AllowCredentials is spec-violating and browser-rejected; refuse to
+	// enable credentials in that case and log the misconfiguration.
+	corsAllowCredentials := true
+	for _, o := range cfg.CORSOrigins {
+		if o == "*" {
+			corsAllowCredentials = false
+			log.Printf("⚠ CORS_ORIGINS contains '*' — refusing to enable AllowCredentials (unsafe). Set explicit origins in prod.")
+			break
+		}
+	}
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     cfg.CORSOrigins,
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept"},
-		AllowCredentials: true,
+		AllowCredentials: corsAllowCredentials,
 	}))
 
 	api := r.Group("/api")
@@ -168,7 +225,7 @@ func main() {
 		if !dataDBAvailable {
 			mode = "no_database"
 		}
-		c.JSON(200, gin.H{"status": "ok", "mode": mode, "tecdoc": false})
+		c.JSON(200, gin.H{"status": "ok", "mode": mode, "tecdoc": tecdocEnabled})
 	})
 
 	frontendDir := os.Getenv("FRONTEND_DIR")

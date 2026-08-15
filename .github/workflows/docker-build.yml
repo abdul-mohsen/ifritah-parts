@@ -1,0 +1,76 @@
+name: docker-build
+
+# Verify the single-container Dockerfile builds cleanly on every push and PR.
+# This CI job catches the exact class of failure that leaked past PR #4 review:
+# `RUN go mod download` failing inside the Docker builder stage.
+#
+# Uses Docker Buildx so the module cache is reused across runs. Falls back to
+# a full download when the cache is cold.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: parts-engine:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image runs postgres + server locally
+        # Boot the container in the background, poll /health up to 60 s.
+        # This catches broken migrations or a mis-wired entrypoint, not just a
+        # successful `docker build`.
+        #
+        # ALLOW_NO_MYSQL=1 is required in CI: MySQL/TecDoc is mandatory in
+        # production, but CI has no TecDoc source to point at. The server
+        # would otherwise exit at startup by design.
+        run: |
+          docker run -d --name parts-engine-ci \
+              -e CORS_ORIGINS='http://localhost:5173' \
+              -e ALLOW_NO_MYSQL=1 \
+              -p 8080:8080 \
+              parts-engine:ci-${{ github.sha }}
+          echo "waiting for /health ..."
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              echo "OK after ${i}s"
+              curl -sS http://127.0.0.1:8080/health
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "TIMEOUT — dumping logs:"
+          docker logs parts-engine-ci
+          exit 1
+
+      - name: Container logs (for debugging when the smoke test above fails)
+        if: failure()
+        run: |
+          docker logs parts-engine-ci || true
+          docker inspect parts-engine-ci || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f parts-engine-ci 2>/dev/null || true
