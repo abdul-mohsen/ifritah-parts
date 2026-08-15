@@ -73,10 +73,28 @@ func (h *PartsHandler) ByVehicle(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	enrich := c.DefaultQuery("enrich", "false") == "true"
 
-	rawParts, total, ferr := h.parts.FindByLinkageTarget(id, category, page, limit)
-	if ferr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": ferr.Error()})
-		return
+	// Step 0: MySQL/TecDoc is the source of truth for vehicle fitment.
+	// When connected, its articlesvehicletrees join is authoritative — the
+	// local Postgres cache is a snapshot of it. Prefer TecDoc when available.
+	var rawParts []model.Part
+	var total int
+	var ferr error
+	if h.tecdoc != nil {
+		tdResults, tdTotal, tdErr := h.tecdoc.PartsForVehicle(id, category, page, limit)
+		if tdErr == nil && len(tdResults) > 0 {
+			total = tdTotal
+			rawParts = make([]model.Part, 0, len(tdResults))
+			for _, r := range tdResults {
+				rawParts = append(rawParts, r.Part)
+			}
+		}
+	}
+	if rawParts == nil {
+		rawParts, total, ferr = h.parts.FindByLinkageTarget(id, category, page, limit)
+		if ferr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": ferr.Error()})
+			return
+		}
 	}
 
 	var parts []service.PartWithOEM

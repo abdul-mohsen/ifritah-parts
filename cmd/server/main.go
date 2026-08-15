@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 
 	"parts-engine/internal/config"
 	"parts-engine/internal/db"
@@ -20,6 +21,21 @@ import (
 )
 
 func main() {
+	// Auto-load .env from the current working directory (and its parents up to
+	// the module root) BEFORE config.Load reads env vars. Missing .env is not
+	// an error — the app boots off pure OS environment variables in that case.
+	// This matches how the docs describe the run recipe: "edit .env, run
+	// ./server" — without godotenv the Go binary would ignore .env entirely
+	// (unlike Node/Python which auto-load).
+	for _, candidate := range []string{".env", "../.env", "../../.env"} {
+		if _, err := os.Stat(candidate); err == nil {
+			if err := godotenv.Load(candidate); err == nil {
+				log.Printf("✓ Loaded env from %s", candidate)
+				break
+			}
+		}
+	}
+
 	cfg := config.Load()
 
 	pg := db.NewPostgres(cfg)
@@ -113,8 +129,9 @@ func main() {
 	// searches that miss the local Postgres cache — the source-of-truth for
 	// the 21.5M-row oem_number and 651M-row articlesvehicletrees data.
 	var tecdocEnabled bool
+	var tecdoc *service.TecDoc
 	if mysql != nil {
-		tecdoc := service.NewTecDoc(mysql)
+		tecdoc = service.NewTecDoc(mysql)
 		if tecdoc != nil {
 			smartSearch.SetTecDoc(tecdoc)
 			tecdocEnabled = true
@@ -132,6 +149,10 @@ func main() {
 	partsH.SetCategoryTree(categoryTree)
 	partsH.SetPlacementAdvisor(placementAdvisor)
 	partsH.SetReplacementAdvisor(replacementAdvisor)
+	// TecDoc-first for /api/vehicle/:id/parts + /api/part/:id/detail when MySQL is connected.
+	if tecdoc != nil {
+		partsH.SetTecDoc(tecdoc)
+	}
 	oemH := handler.NewOEMHandler(oemLookup)
 	oemH.SetCrossRef(crossRef)
 	oemH.SetPartsLookup(partsLookup)

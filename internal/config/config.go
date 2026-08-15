@@ -59,14 +59,28 @@ func Load() *Config {
 		PostgresDB:       envOr("PGDATABASE", "parts_engine"),
 		PostgresSSLMode:  envOr("PGSSLMODE", "disable"),
 
-		// MySQL fields default to empty. When MYSQL_HOST is empty the caller
-		// skips the connection entirely. This is deliberate: the TecDoc dataset
-		// only lives on the production MySQL, so local dev + CI runs without it.
-		MySQLHost:     os.Getenv("MYSQL_HOST"),
-		MySQLPort:     envOr("MYSQL_PORT", "3306"),
-		MySQLUser:     envOr("MYSQL_USER", "root"),
-		MySQLPassword: os.Getenv("MYSQL_PASSWORD"),
-		MySQLDB:       envOr("MYSQL_DATABASE", "dev_ifritah"),
+		// MySQL — the primary source of truth for parts. Every OEM / text /
+		// vehicle search must consult MySQL FIRST (the 21.5M-row oem_number
+		// table + articlesvehicletrees + articlecrosses + articlecriteria).
+		// The local Postgres + SQLite tables are a cache / enrichment layer,
+		// not the authority.
+		//
+		// Canonical env-var names (documented in C:\ssda\chatGPT\parts\test_queries.go):
+		//   HOST      → "host:port" or bare host
+		//   DBPORT    → 3306 default (ignored if HOST already has :port)
+		//   DBUSER    → root default
+		//   PASSWORD  → required in production, empty in dev
+		//   DBNAME    → dev_ifritah default
+		// Aliases (accepted but secondary): MYSQL_HOST, MYSQL_PORT, MYSQL_USER,
+		//   MYSQL_PASSWORD, MYSQL_DATABASE.
+		//
+		// Empty HOST + no MYSQL_HOST + no ALLOW_NO_MYSQL=1 → server exits at
+		// startup. See internal/db/mysql.go for the fail-hard contract.
+		MySQLHost:     firstNonEmpty(stripPort(os.Getenv("HOST")), os.Getenv("MYSQL_HOST")),
+		MySQLPort:     firstNonEmpty(os.Getenv("DBPORT"), portFrom(os.Getenv("HOST")), os.Getenv("MYSQL_PORT"), "3306"),
+		MySQLUser:     firstNonEmpty(os.Getenv("DBUSER"), os.Getenv("MYSQL_USER"), "root"),
+		MySQLPassword: firstNonEmpty(os.Getenv("PASSWORD"), os.Getenv("MYSQL_PASSWORD")),
+		MySQLDB:       firstNonEmpty(os.Getenv("DBNAME"), os.Getenv("MYSQL_DATABASE"), "dev_ifritah"),
 
 		ServerPort:      envOr("PORT", "8080"),
 		BindAddr:        envOr("BIND_ADDR", "0.0.0.0"),
@@ -138,4 +152,42 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// firstNonEmpty returns the first non-empty value from the given strings.
+// Used to layer legacy env-var names underneath the new MYSQL_* namespace
+// (see MySQL fields in Load()).
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stripPort parses a legacy HOST="host:port" value and returns just the host.
+// When the input has no colon, returns it unchanged.
+func stripPort(hostPort string) string {
+	hostPort = strings.TrimSpace(hostPort)
+	if hostPort == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(hostPort); err == nil {
+		return h
+	}
+	return hostPort
+}
+
+// portFrom extracts the port from a legacy HOST="host:port" value.
+// Returns empty string when there is no port.
+func portFrom(hostPort string) string {
+	hostPort = strings.TrimSpace(hostPort)
+	if hostPort == "" {
+		return ""
+	}
+	if _, p, err := net.SplitHostPort(hostPort); err == nil {
+		return p
+	}
+	return ""
 }
