@@ -1,0 +1,38 @@
+name: govulncheck
+
+# Scan the Go module graph against the public Go vulnerability database.
+# Runs on every push + PR, and once a day on schedule so newly-published CVEs
+# against pinned versions surface within 24 h even without any code change.
+#
+# Non-blocking today (continue-on-error is false so the job status reflects
+# reality, but no branch protection is enforced yet — flip to required once
+# the fleet is clean).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC daily
+
+concurrency:
+  group: govulncheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./cmd/... ./internal/...

@@ -28,11 +28,22 @@ COPY frontend/ ./
 RUN npm run build
 
 # ── Stage 2: Go server build ────────────────────────────
-FROM golang:1.25-alpine AS builder
+# Use the Debian-based golang image (not -alpine) for two reasons:
+#   1. The full CA bundle is preinstalled, so `go mod download` succeeds in
+#      environments where Alpine's smaller trust store is intercepted by a
+#      corporate SSL proxy (observed on the operator's local Docker Desktop
+#      when the pre-merge Dockerfile used golang:1.25-alpine).
+#   2. GOPROXY defaults to https://proxy.golang.org — set GOPROXY=direct as a
+#      belt-and-braces fallback so restrictive networks that block proxy.golang.org
+#      still resolve modules from source.
+FROM golang:1.25 AS builder
 WORKDIR /src
 ENV GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux
 COPY go.mod go.sum ./
-RUN go mod download
+# --mount=type=cache reuses the module cache across builds when BuildKit is on.
+# `|| GOPROXY=direct go mod download` is a fallback for networks that block
+# proxy.golang.org.
+RUN go mod download || (GOPROXY=direct go mod download)
 COPY cmd/ cmd/
 COPY internal/ internal/
 COPY db/ db/

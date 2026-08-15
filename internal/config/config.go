@@ -1,12 +1,20 @@
 package config
 
 import (
+	"net"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/go-sql-driver/mysql"
 )
 
+// Config holds every runtime setting the server reads at startup. Fields are
+// grouped by domain (Postgres = owned catalog / sqlc; MySQL = optional TecDoc
+// source; server, CORS, external APIs). Every field is env-driven with an
+// explicit default in Load() so the zero-value struct never leaves this file.
 type Config struct {
+	// PostgreSQL — owned catalog, sqlc-generated store, primary runtime DB.
 	PostgresURL      string
 	PostgresHost     string
 	PostgresPort     string
@@ -15,11 +23,26 @@ type Config struct {
 	PostgresDB       string
 	PostgresSSLMode  string
 
+	// MySQL — optional TecDoc source (the "big data" on the server: articles,
+	// articlecrosses, oem_number, articlesvehicletrees, articlecriteria, etc.).
+	// When MySQLHost is empty, the TecDoc reader is skipped and the app runs
+	// on Postgres + SQLite cache alone. When set, internal/service/tecdoc.go is
+	// initialised and the /health endpoint reports tecdoc:true.
+	MySQLHost     string
+	MySQLPort     string
+	MySQLUser     string
+	MySQLPassword string
+	MySQLDB       string
+
+	// Server
 	ServerPort string
 	BindAddr   string
 	DataDir    string
 
-	CORSOrigins     []string
+	// CORS
+	CORSOrigins []string
+
+	// External services
 	ElasticURL      string
 	NHTSABaseURL    string
 	NHTSARecallsURL string
@@ -35,13 +58,23 @@ func Load() *Config {
 		PostgresPassword: os.Getenv("PGPASSWORD"),
 		PostgresDB:       envOr("PGDATABASE", "parts_engine"),
 		PostgresSSLMode:  envOr("PGSSLMODE", "disable"),
-		ServerPort:       envOr("PORT", "8080"),
-		BindAddr:         envOr("BIND_ADDR", "0.0.0.0"),
-		DataDir:          envOr("DATA_DIR", ""),
-		CORSOrigins:      splitCSV(origins),
-		ElasticURL:       envOr("ELASTIC_URL", "http://localhost:9200"),
-		NHTSABaseURL:     envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
-		NHTSARecallsURL:  envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
+
+		// MySQL fields default to empty. When MYSQL_HOST is empty the caller
+		// skips the connection entirely. This is deliberate: the TecDoc dataset
+		// only lives on the production MySQL, so local dev + CI runs without it.
+		MySQLHost:     os.Getenv("MYSQL_HOST"),
+		MySQLPort:     envOr("MYSQL_PORT", "3306"),
+		MySQLUser:     envOr("MYSQL_USER", "root"),
+		MySQLPassword: os.Getenv("MYSQL_PASSWORD"),
+		MySQLDB:       envOr("MYSQL_DATABASE", "dev_ifritah"),
+
+		ServerPort:      envOr("PORT", "8080"),
+		BindAddr:        envOr("BIND_ADDR", "0.0.0.0"),
+		DataDir:         envOr("DATA_DIR", ""),
+		CORSOrigins:     splitCSV(origins),
+		ElasticURL:      envOr("ELASTIC_URL", "http://localhost:9200"),
+		NHTSABaseURL:    envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
+		NHTSARecallsURL: envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
 	}
 }
 
@@ -56,6 +89,8 @@ func splitCSV(s string) []string {
 	return out
 }
 
+// PostgresDSN builds the connection string for the primary runtime DB.
+// Honours DATABASE_URL when set; otherwise assembles from the discrete PG* vars.
 func (c *Config) PostgresDSN() string {
 	if c.PostgresURL != "" {
 		return c.PostgresURL
@@ -70,6 +105,32 @@ func (c *Config) PostgresDSN() string {
 	q.Set("sslmode", c.PostgresSSLMode)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// MySQLEnabled reports whether the operator has configured a MySQL host.
+// The whole MySQL/TecDoc path is skipped when this is false.
+func (c *Config) MySQLEnabled() bool {
+	return strings.TrimSpace(c.MySQLHost) != ""
+}
+
+// MySQLDSN builds a DSN suitable for the go-sql-driver/mysql driver.
+// InterpolateParams is deliberately set to false — we want the driver to
+// use server-side prepared statements. Every query in the codebase already
+// uses parameterised placeholders, so this is defence-in-depth.
+func (c *Config) MySQLDSN() string {
+	cfg := mysql.NewConfig()
+	cfg.User = c.MySQLUser
+	cfg.Passwd = c.MySQLPassword
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(c.MySQLHost, c.MySQLPort)
+	cfg.DBName = c.MySQLDB
+	cfg.ParseTime = true
+	cfg.Params = map[string]string{"charset": "utf8mb4"}
+	// See note above: keep InterpolateParams=false so the driver uses real
+	// prepared statements. If throughput becomes an issue on batch loaders,
+	// override on the specific caller, not globally.
+	cfg.InterpolateParams = false
+	return cfg.FormatDSN()
 }
 
 func envOr(key, fallback string) string {
