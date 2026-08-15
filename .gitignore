@@ -13,7 +13,14 @@
 *.db-*
 *.sqlite
 *.sqlite3
-data/
+
+# The tracked pre-built SQLite/JSON seed data lives under data/. We only
+# want to ignore RUNTIME-generated files inside data/, not the shipped
+# seed. `!` re-includes tracked seed by name explicitly.
+data/*.db-wal
+data/*.db-shm
+data/worker_contributions.db
+data/external_sources.db
 
 # Frontend dependencies and build output
 frontend/node_modules/
@@ -32,6 +39,14 @@ still_not_found.txt
 not_found_*.txt
 qa_*.txt
 estimate_output.txt
+
+# Runtime logs from scripts/dev-server.ps1
+logs/
+
+# Playwright audit outputs (screenshots, HAR, trace files — regenerated per run)
+qa/e2e-report/
+qa/harsh-probe*.json
+qa/harsh-probe.md
 
 # Captured research and debug inputs
 scripts/debug_html/
