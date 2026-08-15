@@ -56,6 +56,10 @@ jobs:
       BIND_ADDR: 127.0.0.1
       CORS_ORIGINS: http://127.0.0.1:8080
       QA_BASE_URL: http://127.0.0.1:8080
+      # MySQL is mandatory in production; CI has no TecDoc source to seed,
+      # so we bypass the hard-fail here. Every other environment (staging,
+      # prod) must leave this unset — the server exits if MySQL is missing.
+      ALLOW_NO_MYSQL: '1'
       # MySQL/TecDoc intentionally disabled — MYSQL_HOST unset →
       # internal/db/mysql.go returns nil and the TecDoc adapter stays inert.
 

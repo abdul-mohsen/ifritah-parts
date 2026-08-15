@@ -41,9 +41,14 @@ jobs:
         # Boot the container in the background, poll /health up to 60 s.
         # This catches broken migrations or a mis-wired entrypoint, not just a
         # successful `docker build`.
+        #
+        # ALLOW_NO_MYSQL=1 is required in CI: MySQL/TecDoc is mandatory in
+        # production, but CI has no TecDoc source to point at. The server
+        # would otherwise exit at startup by design.
         run: |
           docker run -d --name parts-engine-ci \
               -e CORS_ORIGINS='http://localhost:5173' \
+              -e ALLOW_NO_MYSQL=1 \
               -p 8080:8080 \
               parts-engine:ci-${{ github.sha }}
           echo "waiting for /health ..."
