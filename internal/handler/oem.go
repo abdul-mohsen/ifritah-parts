@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"parts-engine/internal/model"
 	"parts-engine/internal/service"
 )
 
@@ -54,6 +55,37 @@ func (h *OEMHandler) Lookup(c *gin.Context) {
 		return
 	}
 	log.Printf("[OEMHandler] oem.Search returned %d results in %v", result.Total, time.Since(start))
+	if h.parts != nil {
+		directParts, directErr := h.parts.FindByArticleNumber(number, 0, limit)
+		if directErr != nil {
+			log.Printf("[OEMHandler] exact catalog part lookup failed: %v", directErr)
+		} else {
+			seen := make(map[int]bool, len(result.Results))
+			for _, ref := range result.Results {
+				seen[ref.LegacyArticleId] = true
+			}
+			directRefs := make([]model.OEMReference, 0, len(directParts))
+			for _, part := range directParts {
+				if seen[part.LegacyArticleId] {
+					continue
+				}
+				seen[part.LegacyArticleId] = true
+				directRefs = append(directRefs, model.OEMReference{
+					RawNumber:       number,
+					Normalized:      service.NormalizeOEM(number),
+					LegacyArticleId: part.LegacyArticleId,
+					Manufacturer:    "HYUNDAI/KIA",
+					BrandName:       part.BrandName,
+					ArticleNumber:   part.ArticleNumber,
+					Description:     part.Description,
+				})
+			}
+			if len(directRefs) > 0 {
+				result.Results = append(directRefs, result.Results...)
+				result.Total = len(result.Results)
+			}
+		}
+	}
 
 	resp := gin.H{
 		"query":      number,
@@ -63,11 +95,11 @@ func (h *OEMHandler) Lookup(c *gin.Context) {
 	}
 
 	// Enrich: find vehicles that use these parts
-	if includeVehicles && h.parts != nil && len(result.Results) > 0 {
+	if includeVehicles && h.cross != nil && len(result.Results) > 0 {
 		articleId := result.Results[0].LegacyArticleId
 		log.Printf("[OEMHandler] enriching vehicles for articleId=%d", articleId)
 		if articleId > 0 {
-			vehicles, verr := h.parts.ReverseByArticle(articleId, 20)
+			vehicles, verr := h.cross.FindVehiclesForArticle(articleId, 0, "", 20)
 			if verr == nil && len(vehicles) > 0 {
 				resp["fitsVehicles"] = vehicles
 			}

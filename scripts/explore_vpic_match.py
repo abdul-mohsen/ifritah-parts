@@ -49,7 +49,7 @@ for elem_name, code, keys, attr_id, lookup in patterns:
     # Keys like 'AA6A' or '[AB]Z0C' or '*Y1A'
     regex_keys = keys.replace('*', '.')
     key_len = len(re.sub(r'\[.*?\]', 'X', regex_keys))
-    
+
     # Try matching against VDS starting at pos 4
     segment = vin[3:3+key_len]
     if re.fullmatch(regex_keys, segment):

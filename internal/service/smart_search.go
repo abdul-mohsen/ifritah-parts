@@ -1,14 +1,17 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"parts-engine/internal/model"
+	"parts-engine/internal/store"
 )
 
 // SmartSearch provides category-aware parts search with cross-reference expansion.
@@ -23,10 +26,15 @@ type SmartSearch struct {
 	tecdoc       *TecDoc
 	dependency   *DependencyClassifier
 	offline      bool
+	queries      *store.Queries
 }
 
 func NewSmartSearch(db *sql.DB, parts *PartsLookup, crossRef *CrossRef, oem *OEMLookup, platform *Platform, online *PartsOuqService, offline bool) *SmartSearch {
-	return &SmartSearch{db: db, parts: parts, crossRef: crossRef, oem: oem, platform: platform, onlineLookup: online, offline: offline}
+	ss := &SmartSearch{db: db, parts: parts, crossRef: crossRef, oem: oem, platform: platform, onlineLookup: online, offline: offline}
+	if db != nil {
+		ss.queries = store.New(db)
+	}
+	return ss
 }
 
 // SetDependencyClassifier attaches the data-driven dependency classifier.
@@ -143,6 +151,28 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 		SearchStrategy: "oem_crossref",
 	}
 
+	// ─── HK scope gate ────────────────────────────────────────────────
+	// Before running any online / dealer / supersession fallback, verify
+	// this even looks like a Hyundai/Kia OEM. If not, we short-circuit
+	// with an honest "not in scope" message — the app is documented as
+	// HK-only (README.md, ARCHITECTURE.md §data-source-boundaries).
+	//
+	// Owned-catalog and cross-ref lookups still run (they only ever hold
+	// HK-scoped data anyway), so a valid HK OEM disguised in a weird
+	// format still gets a chance via the seeded corpus below.
+	scope := IsHKOEM(oemNum)
+	if !scope.IsHK {
+		log.Printf("[SmartSearch.searchByOEM] REJECTED by HK-scope gate: %s", scope.Reason)
+		resp.SearchStrategy = "hk_scope_rejected"
+		resp.Warnings = append(resp.Warnings, scope.Reason)
+		if scope.SuggestedMake != "" {
+			resp.Warnings = append(resp.Warnings,
+				"Try the parts distributor for "+scope.SuggestedMake+" instead.")
+		}
+		resp.Total = 0
+		return resp, nil
+	}
+
 	// Step 1: CrossRef service (oem_search_index — indexed)
 	log.Printf("[SmartSearch.searchByOEM] STEP 1: CrossRef.FindByOEM")
 	refs, err := s.crossRef.FindByOEM(oemNum, limit)
@@ -171,6 +201,37 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 			}
 		}
 	}
+
+	// An exact owned-catalog part-number record is stronger evidence than a
+	// cross-reference. Do not return it for a selected vehicle unless its
+	// catalog fitment link confirms compatibility.
+	if s.parts != nil {
+		directParts, directErr := s.parts.FindByArticleNumber(oemNum, linkageTargetId, limit)
+		if directErr != nil {
+			return nil, fmt.Errorf("exact catalog OEM match: %w", directErr)
+		}
+		for _, part := range directParts {
+			duplicate := false
+			for _, existing := range refs {
+				if existing.LegacyArticleId == part.LegacyArticleId {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				refs = append(refs, model.OEMReference{
+					RawNumber:       oemNum,
+					Normalized:      NormalizeOEM(oemNum),
+					LegacyArticleId: part.LegacyArticleId,
+					Manufacturer:    "HYUNDAI/KIA",
+					BrandName:       part.BrandName,
+					ArticleNumber:   part.ArticleNumber,
+					Description:     part.Description,
+				})
+			}
+		}
+	}
+	sortOEMReferences(refs, oemNum)
 
 	log.Printf("[SmartSearch.searchByOEM] MERGED refs=%d (elapsed=%v)", len(refs), time.Since(start))
 
@@ -247,6 +308,13 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 					if onlineResult.Description == "" {
 						continue
 					}
+					// Reject scraped UI chrome ("Sign up with", "Login",
+					// "Cookie Preferences", etc.) that would otherwise be
+					// surfaced as a 0.75-confidence part.
+					if IsJunkDescription(onlineResult.Description) {
+						log.Printf("[SmartSearch.searchByOEM] online result rejected as junk description: %q", onlineResult.Description)
+						continue
+					}
 					result := SmartResult{
 						Part: model.Part{
 							LegacyArticleId: 0,
@@ -284,6 +352,10 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 					resp.SearchStrategy = "online_partsouq_stripped"
 					for _, onlineResult := range onlineResults2 {
 						if onlineResult.Description == "" {
+							continue
+						}
+						if IsJunkDescription(onlineResult.Description) {
+							log.Printf("[SmartSearch.searchByOEM] online (stripped) result rejected as junk description: %q", onlineResult.Description)
 							continue
 						}
 						result := SmartResult{
@@ -335,7 +407,7 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 		log.Printf("[SmartSearch.searchByOEM] STEP 8: dealer lookup")
 		if s.dealerLookup != nil {
 			dealerResult := s.dealerLookup.LookupPart(oemNum)
-			if dealerResult != nil && dealerResult.Description != "" {
+			if dealerResult != nil && dealerResult.Description != "" && !IsJunkDescription(dealerResult.Description) {
 				log.Printf("dealer lookup found: %s → %s", oemNum, dealerResult.Description)
 				resp.SearchStrategy = "dealer_lookup"
 				result := SmartResult{
@@ -358,12 +430,15 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 				s.enrichAftermarket(resp)
 				return resp, nil
 			}
+			if dealerResult != nil && IsJunkDescription(dealerResult.Description) {
+				log.Printf("[SmartSearch.searchByOEM] dealer result rejected as junk description: %q", dealerResult.Description)
+			}
 		}
 
 		// Strategy 7: Reverse supersession — check if any cached part lists this as a substitution
 		log.Printf("[SmartSearch.searchByOEM] STEP 9: reverse supersession")
 		if s.onlineLookup != nil && s.onlineLookup.GetCache() != nil {
-			if superseded := s.onlineLookup.GetCache().FindBySubstitution(NormalizeOEM(oemNum)); superseded != nil {
+			if superseded := s.onlineLookup.GetCache().FindBySubstitution(NormalizeOEM(oemNum)); superseded != nil && !IsJunkDescription(superseded.Description) {
 				log.Printf("supersession found: %s → via %s", oemNum, superseded.PartNumber)
 				resp.SearchStrategy = "supersession_reverse"
 				result := SmartResult{
@@ -442,6 +517,10 @@ buildResults:
 
 		rule := ClassifyCategory(ref.Description)
 		conf, note := s.computeConfidence(rule, vehicleCC, 0, fuelType, "", ref.LegacyArticleId, linkageTargetId)
+		if NormalizeOEM(ref.ArticleNumber) == NormalizeOEM(oemNum) {
+			conf = 0.96
+			note = "Exact part-number match in the owned catalog"
+		}
 
 		result := SmartResult{
 			Part: model.Part{
@@ -464,6 +543,28 @@ buildResults:
 
 	resp.Total = len(resp.Results)
 	return resp, nil
+}
+
+func sortOEMReferences(refs []model.OEMReference, query string) {
+	normalizedQuery := NormalizeOEM(query)
+	sort.SliceStable(refs, func(i, j int) bool {
+		return oemReferenceRank(refs[i], normalizedQuery) > oemReferenceRank(refs[j], normalizedQuery)
+	})
+}
+
+func oemReferenceRank(ref model.OEMReference, normalizedQuery string) int {
+	rank := 0
+	if NormalizeOEM(ref.ArticleNumber) == normalizedQuery {
+		rank += 1000
+	}
+	if NormalizeOEM(ref.RawNumber) == normalizedQuery {
+		rank += 100
+	}
+	brand := strings.ToUpper(ref.BrandName + " " + ref.Manufacturer)
+	if strings.Contains(brand, "HYUNDAI") || strings.Contains(brand, "KIA") {
+		rank += 10
+	}
+	return rank
 }
 
 // enrichAftermarket adds aftermarket alternatives from the aftermarket_crossref table
@@ -543,50 +644,28 @@ func (s *SmartSearch) searchByArticle(artNum string, linkageTargetId, vehicleCC,
 
 	normalized := strings.ToUpper(strings.TrimSpace(artNum))
 
-	// Find in hk_parts_cache first (fast)
-	var query string
-	if s.offline {
-		// SQLite: no articles/ambrand tables
-		query = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       hk.brandName, hk.categoryName, hk.assemblyGroupNodeId,
-			       hk.capacityCC
-			FROM hk_parts_cache hk
-			WHERE UPPER(hk.articleNumber) = ?
-			LIMIT ?`
-	} else {
-		query = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       COALESCE(ab.brandName, hk.brandName) AS brand, hk.categoryName, hk.assemblyGroupNodeId,
-			       hk.capacityCC
-			FROM hk_parts_cache hk
-			LEFT JOIN articles a ON a.legacyArticleId = hk.legacyArticleId
-			LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-			WHERE UPPER(hk.articleNumber) = ?
-			LIMIT ?`
-	}
-
-	rows, err := logQuery(s.db, "SmartSearch.searchByArticle.hk", query, normalized, limit)
+	rows, err := s.queries.SearchByArticleNumber(context.Background(), store.SearchByArticleNumberParams{
+		Upper: normalized,
+		Limit: int32(limit),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("article search: %w", err)
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var p model.Part
-		var desc, brand, cat sql.NullString
-		var partCC sql.NullInt32
-		if err := rows.Scan(&p.LegacyArticleId, &p.ArticleNumber, &desc, &brand, &cat, &p.AssemblyGroupId, &partCC); err != nil {
-			return nil, fmt.Errorf("scan article: %w", err)
+	for _, row := range rows {
+		p := model.Part{
+			LegacyArticleId: int(row.LegacyArticleID),
+			ArticleNumber:   row.ArticleNumber.String,
+			Description:     row.GenericArticleDesc.String,
+			BrandName:       row.BrandName.String,
+			Category:        row.CategoryName.String,
+			AssemblyGroupId: int(row.AssemblyGroupNodeID),
 		}
-		p.Description = desc.String
-		p.BrandName = brand.String
-		p.Category = cat.String
 
 		rule := ClassifyCategory(p.Description)
 		var fitsCC int
-		if partCC.Valid {
-			fitsCC = int(partCC.Int32)
+		if row.CapacityCc.Valid {
+			fitsCC = int(row.CapacityCc.Int32)
 		}
 
 		conf, note := s.computeConfidence(rule, vehicleCC, fitsCC, "", "", p.LegacyArticleId, linkageTargetId)
@@ -596,7 +675,7 @@ func (s *SmartSearch) searchByArticle(artNum string, linkageTargetId, vehicleCC,
 			Confidence:     conf,
 			ConfidenceNote: note,
 			FitmentDriver:  driverName(rule.Driver),
-			BrandResolved:  brand.String,
+			BrandResolved:  row.BrandName.String,
 			FitsVehicleCC:  fitsCC,
 		}
 
@@ -609,52 +688,8 @@ func (s *SmartSearch) searchByArticle(artNum string, linkageTargetId, vehicleCC,
 		resp.Results = append(resp.Results, result)
 	}
 
-	if len(resp.Results) == 0 && !s.offline {
-		// Fallback: search articles table directly (MySQL only)
-		fallback := `
-			SELECT a.legacyArticleId, a.articleNumber, a.genericArticleDescription,
-			       ab.brandName
-			FROM articles a
-			LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-			WHERE UPPER(a.articleNumber) = ?
-			LIMIT ?`
-
-		rows2, err := logQuery(s.db, "SmartSearch.searchByArticle.fallback", fallback, normalized, limit)
-		if err != nil {
-			return nil, fmt.Errorf("article fallback: %w", err)
-		}
-		defer rows2.Close()
-
-		for rows2.Next() {
-			var p model.Part
-			var desc, brand sql.NullString
-			if err := rows2.Scan(&p.LegacyArticleId, &p.ArticleNumber, &desc, &brand); err != nil {
-				return nil, fmt.Errorf("scan fallback: %w", err)
-			}
-			p.Description = desc.String
-			p.BrandName = brand.String
-
-			result := SmartResult{
-				Part:           p,
-				Confidence:     0.5,
-				ConfidenceNote: "Found in articles table (not in HK cache — may not fit your vehicle)",
-				FitmentDriver:  driverName(ClassifyCategory(p.Description).Driver),
-				BrandResolved:  brand.String,
-			}
-
-			oems, _ := s.crossRef.FindOEMNumbers(p.LegacyArticleId)
-			if len(oems) > 0 {
-				result.OEMNumbers = oems
-			}
-
-			resp.Results = append(resp.Results, result)
-		}
-	}
-
 	// Fallback: if article lookup found nothing and query looks like it could be a dashless OEM number,
 	// try OEM search with common dash positions (Hyundai/Kia OEM format: XXXXX-XXXXX)
-	// Close all open rows first to release the single SQLite connection.
-	rows.Close()
 	if len(resp.Results) == 0 && len(normalized) >= 9 {
 		oemCandidates := generateOEMCandidates(normalized)
 		for _, candidate := range oemCandidates {
@@ -733,38 +768,33 @@ func normalizeForSuffix(s string) string {
 
 // prefixOEMSearch does a LIKE prefix search on the oem_search_index for near-miss lookups.
 func (s *SmartSearch) prefixOEMSearch(normalizedPrefix string, limit int) []model.OEMReference {
-	if s.db == nil || len(normalizedPrefix) < 8 {
+	if s.queries == nil || len(normalizedPrefix) < 8 {
 		return nil
 	}
-	query := `SELECT raw_number, normalized, legacyArticleId, source_table,
-	                 mfr_name, brand_name, article_number, description
-	          FROM oem_search_index
-	          WHERE normalized LIKE ?
-	          LIMIT ?`
-	rows, err := logQuery(s.db, "SmartSearch.prefixOEM", query, normalizedPrefix+"%", limit)
+	rows, err := s.queries.SearchOEMPrefix(context.Background(), store.SearchOEMPrefixParams{
+		Normalized: normalizedPrefix + "%",
+		Limit:      int32(limit),
+	})
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 
 	var refs []model.OEMReference
 	seen := make(map[int]bool)
-	for rows.Next() {
-		var ref model.OEMReference
-		var norm, src, mfr, brand, artNum, desc sql.NullString
-		if err := rows.Scan(&ref.RawNumber, &norm, &ref.LegacyArticleId, &src,
-			&mfr, &brand, &artNum, &desc); err != nil {
-			continue
+	for _, row := range rows {
+		ref := model.OEMReference{
+			RawNumber:       row.RawNumber,
+			Normalized:      row.Normalized,
+			LegacyArticleId: int(row.LegacyArticleID),
+			Manufacturer:    row.MfrName.String,
+			BrandName:       row.BrandName.String,
+			ArticleNumber:   row.ArticleNumber.String,
+			Description:     row.Description.String,
 		}
 		if seen[ref.LegacyArticleId] {
 			continue
 		}
 		seen[ref.LegacyArticleId] = true
-		ref.Normalized = norm.String
-		ref.Manufacturer = mfr.String
-		ref.BrandName = brand.String
-		ref.ArticleNumber = artNum.String
-		ref.Description = desc.String
 		refs = append(refs, ref)
 	}
 	return refs
@@ -776,99 +806,64 @@ func (s *SmartSearch) searchByVehicle(textFilter string, linkageTargetId, vehicl
 		Query:          textFilter,
 		SearchStrategy: "vehicle_smart",
 	}
+	normalizedFilter := normalizeTextSearchQuery(textFilter)
 
 	offset := (page - 1) * limit
 
-	// Build the query with optional text and category filters
-	where := "hk.linkingTargetId = ?"
-	args := []any{linkageTargetId}
-
-	if category != "" {
-		where += " AND (hk.genericArticleDesc LIKE ? OR hk.categoryName LIKE ?)"
-		args = append(args, "%"+category+"%", "%"+category+"%")
-	}
-	if textFilter != "" {
-		where += " AND (hk.genericArticleDesc LIKE ? OR hk.articleNumber LIKE ? OR hk.categoryName LIKE ?)"
-		args = append(args, "%"+textFilter+"%", "%"+textFilter+"%", "%"+textFilter+"%")
-	}
-
-	// Count
-	countSQL := "SELECT COUNT(DISTINCT hk.legacyArticleId) FROM hk_parts_cache hk WHERE " + where
-	var total int
-	if err := logQueryRow(s.db, "SmartSearch.searchByVehicle.count", countSQL, args...).Scan(&total); err != nil {
+	total, err := s.queries.CountVehicleSearchParts(context.Background(), store.CountVehicleSearchPartsParams{
+		LinkingTargetID: int32(linkageTargetId),
+		Column2:         category,
+		Column3:         normalizedFilter,
+	})
+	if err != nil {
 		return nil, fmt.Errorf("count: %w", err)
 	}
-	resp.Total = total
+	resp.Total = int(total)
 
-	// Get distinct categories available
-	catSQL := `SELECT DISTINCT hk.genericArticleDesc FROM hk_parts_cache hk WHERE hk.linkingTargetId = ? AND hk.genericArticleDesc IS NOT NULL AND hk.genericArticleDesc != '' ORDER BY hk.genericArticleDesc`
-	catRows, err := logQuery(s.db, "SmartSearch.searchByVehicle.categories", catSQL, linkageTargetId)
+	catRows, err := s.queries.ListVehicleSearchCategories(context.Background(), int32(linkageTargetId))
 	if err == nil {
-		defer catRows.Close()
-		for catRows.Next() {
-			var c string
-			if catRows.Scan(&c) == nil && c != "" {
-				resp.Categories = append(resp.Categories, c)
+		for _, c := range catRows {
+			if c.Valid && c.String != "" {
+				resp.Categories = append(resp.Categories, c.String)
 			}
 		}
 	}
 
-	// Get parts with brand resolved
-	var dataSQL string
-	if s.offline {
-		dataSQL = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       hk.brandName, hk.categoryName,
-			       hk.assemblyGroupNodeId, hk.capacityCC, hk.fuelType
-			FROM hk_parts_cache hk
-			WHERE ` + where + `
-			ORDER BY hk.genericArticleDesc, hk.brandName
-			LIMIT ? OFFSET ?`
-	} else {
-		dataSQL = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       COALESCE(ab.brandName, hk.brandName) AS brand, hk.categoryName,
-			       hk.assemblyGroupNodeId, hk.capacityCC, hk.fuelType
-			FROM hk_parts_cache hk
-			LEFT JOIN articles a ON a.legacyArticleId = hk.legacyArticleId
-			LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-			WHERE ` + where + `
-			ORDER BY hk.genericArticleDesc, brand
-			LIMIT ? OFFSET ?`
-	}
-
-	dataArgs := append(args, limit, offset)
-	rows, err := logQuery(s.db, "SmartSearch.searchByVehicle.data", dataSQL, dataArgs...)
+	rows, err := s.queries.ListVehicleSearchParts(context.Background(), store.ListVehicleSearchPartsParams{
+		LinkingTargetID: int32(linkageTargetId),
+		Column2:         category,
+		Column3:         normalizedFilter,
+		Limit:           int32(limit),
+		Offset:          int32(offset),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("vehicle search: %w", err)
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var p model.Part
-		var desc, brand, cat, partFuel sql.NullString
-		var partCC sql.NullInt32
-		if err := rows.Scan(&p.LegacyArticleId, &p.ArticleNumber, &desc, &brand, &cat, &p.AssemblyGroupId, &partCC, &partFuel); err != nil {
-			return nil, fmt.Errorf("scan smart: %w", err)
+	for _, row := range rows {
+		p := model.Part{
+			LegacyArticleId: int(row.LegacyArticleID),
+			ArticleNumber:   row.ArticleNumber.String,
+			Description:     row.GenericArticleDesc.String,
+			BrandName:       row.BrandName.String,
+			Category:        row.CategoryName.String,
+			AssemblyGroupId: int(row.AssemblyGroupNodeID),
 		}
-		p.Description = desc.String
-		p.BrandName = brand.String
-		p.Category = cat.String
 
 		rule := ClassifyCategory(p.Description)
 		var fitsCC int
-		if partCC.Valid {
-			fitsCC = int(partCC.Int32)
+		if row.CapacityCc.Valid {
+			fitsCC = int(row.CapacityCc.Int32)
 		}
 
-		conf, note := s.computeConfidenceForVehicle(rule, vehicleCC, fitsCC, fuelType, partFuel.String)
+		conf, note := s.computeConfidenceForVehicle(rule, vehicleCC, fitsCC, fuelType, row.FuelType.String)
 
 		result := SmartResult{
 			Part:           p,
 			Confidence:     conf,
 			ConfidenceNote: note,
 			FitmentDriver:  driverName(rule.Driver),
-			BrandResolved:  brand.String,
+			BrandResolved:  row.BrandName.String,
 			FitsVehicleCC:  fitsCC,
 		}
 
@@ -885,48 +880,26 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 		SearchStrategy: "text_search",
 	}
 	offset := (page - 1) * limit
-
-	// Search hk_parts_cache by text match on description, article number, category
-	var dataSQL string
-	if s.offline {
-		dataSQL = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       hk.brandName, hk.categoryName,
-			       hk.assemblyGroupNodeId, hk.capacityCC
-			FROM hk_parts_cache hk
-			WHERE (hk.genericArticleDesc LIKE ? OR hk.articleNumber LIKE ? OR hk.categoryName LIKE ?)
-			ORDER BY hk.genericArticleDesc, hk.brandName
-			LIMIT ? OFFSET ?`
-	} else {
-		dataSQL = `
-			SELECT DISTINCT hk.legacyArticleId, hk.articleNumber, hk.genericArticleDesc,
-			       COALESCE(ab.brandName, hk.brandName) AS brand, hk.categoryName,
-			       hk.assemblyGroupNodeId, hk.capacityCC
-			FROM hk_parts_cache hk
-			LEFT JOIN articles a ON a.legacyArticleId = hk.legacyArticleId
-			LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-			WHERE (hk.genericArticleDesc LIKE ? OR hk.articleNumber LIKE ? OR hk.categoryName LIKE ?)
-			ORDER BY hk.genericArticleDesc, brand
-			LIMIT ? OFFSET ?`
-	}
-
-	pattern := "%" + text + "%"
-	rows, err := logQuery(s.db, "SmartSearch.searchByText", dataSQL, pattern, pattern, pattern, limit, offset)
+	normalizedText := normalizeTextSearchQuery(text)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := s.queries.SearchByText(ctx, store.SearchByTextParams{
+		RegexpSplitToArray: normalizedText,
+		Limit:              int32(limit),
+		Offset:             int32(offset),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("text search: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var p model.Part
-		var desc, brand, cat sql.NullString
-		var partCC sql.NullInt32
-		if err := rows.Scan(&p.LegacyArticleId, &p.ArticleNumber, &desc, &brand, &cat, &p.AssemblyGroupId, &partCC); err != nil {
-			return nil, fmt.Errorf("scan text: %w", err)
+	for _, row := range rows {
+		p := model.Part{
+			LegacyArticleId: int(row.LegacyArticleID),
+			ArticleNumber:   row.ArticleNumber.String,
+			Description:     row.GenericArticleDesc.String,
+			BrandName:       row.BrandName.String,
+			Category:        row.CategoryName.String,
+			AssemblyGroupId: int(row.AssemblyGroupNodeID),
 		}
-		p.Description = desc.String
-		p.BrandName = brand.String
-		p.Category = cat.String
 
 		rule := ClassifyCategory(p.Description)
 		result := SmartResult{
@@ -934,10 +907,10 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 			Confidence:     0.6, // lower — no vehicle context
 			ConfidenceNote: "Text search without vehicle context",
 			FitmentDriver:  driverName(rule.Driver),
-			BrandResolved:  brand.String,
+			BrandResolved:  row.BrandName.String,
 		}
-		if partCC.Valid {
-			result.FitsVehicleCC = int(partCC.Int32)
+		if row.CapacityCc.Valid {
+			result.FitsVehicleCC = int(row.CapacityCc.Int32)
 		}
 
 		resp.Results = append(resp.Results, result)
@@ -981,12 +954,12 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 // Returns (0.0-1.0 confidence, human-readable note).
 func (s *SmartSearch) computeConfidence(rule CategoryRule, vehicleCC, partCC int, vehicleFuel, partFuel string, legacyArticleId, linkageTargetId int) (float64, string) {
 	// If we have a linkageTargetId, check if this part is actually in hk_parts_cache for it
-	if linkageTargetId > 0 {
-		var exists int
-		err := logQueryRow(s.db, "SmartSearch.computeConfidence.fitCheck",
-			"SELECT 1 FROM hk_parts_cache WHERE linkingTargetId = ? AND legacyArticleId = ? LIMIT 1",
-			linkageTargetId, legacyArticleId).Scan(&exists)
-		if err == nil {
+	if linkageTargetId > 0 && s.queries != nil {
+		exists, err := s.queries.CheckPartFitsVehicle(context.Background(), store.CheckPartFitsVehicleParams{
+			LinkingTargetID: int32(linkageTargetId),
+			LegacyArticleID: int32(legacyArticleId),
+		})
+		if err == nil && exists {
 			return 0.95, "Direct fitment confirmed in parts catalog"
 		}
 	}
@@ -1051,29 +1024,20 @@ func (s *SmartSearch) computeConfidenceForVehicle(rule CategoryRule, vehicleCC, 
 
 // GetCategories returns all distinct part categories for a vehicle.
 func (s *SmartSearch) GetCategories(linkageTargetId int) ([]model.CategoryInfo, error) {
-	if s.db == nil {
+	if s.queries == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
 
-	query := `
-		SELECT genericArticleDesc, COUNT(DISTINCT legacyArticleId) AS partCount
-		FROM hk_parts_cache
-		WHERE linkingTargetId = ?
-		  AND genericArticleDesc IS NOT NULL AND genericArticleDesc != ''
-		GROUP BY genericArticleDesc
-		ORDER BY partCount DESC`
-
-	rows, err := s.db.Query(query, linkageTargetId)
+	rows, err := s.queries.ListCategoryInfos(context.Background(), int32(linkageTargetId))
 	if err != nil {
 		return nil, fmt.Errorf("categories: %w", err)
 	}
-	defer rows.Close()
 
 	var cats []model.CategoryInfo
-	for rows.Next() {
-		var c model.CategoryInfo
-		if err := rows.Scan(&c.Name, &c.PartCount); err != nil {
-			return nil, fmt.Errorf("scan category: %w", err)
+	for _, row := range rows {
+		c := model.CategoryInfo{
+			Name:      row.GenericArticleDesc.String,
+			PartCount: int(row.PartCount),
 		}
 		rule := ClassifyCategory(c.Name)
 		c.FitmentDriver = driverName(rule.Driver)

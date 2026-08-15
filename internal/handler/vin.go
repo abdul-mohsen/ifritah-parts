@@ -18,11 +18,10 @@ type VINHandler struct {
 	platform *service.Platform
 	recalls  *service.RecallsClient
 	cache    *service.VINCache
-	engine   *service.EngineResolver
 }
 
-func NewVINHandler(decoder *service.VINDecoder, parts *service.PartsLookup, platform *service.Platform, recalls *service.RecallsClient, cache *service.VINCache, engine *service.EngineResolver) *VINHandler {
-	return &VINHandler{decoder: decoder, parts: parts, platform: platform, recalls: recalls, cache: cache, engine: engine}
+func NewVINHandler(decoder *service.VINDecoder, parts *service.PartsLookup, platform *service.Platform, recalls *service.RecallsClient, cache *service.VINCache) *VINHandler {
+	return &VINHandler{decoder: decoder, parts: parts, platform: platform, recalls: recalls, cache: cache}
 }
 
 type vinRequest struct {
@@ -98,37 +97,14 @@ func (h *VINHandler) Decode(c *gin.Context) {
 			result["needsConfirmation"] = true
 		}
 
-		// Step 5: Resolve engine codes (display only — not used for fitment filtering)
-		if h.engine != nil {
-			engines, eerr := h.engine.ResolveForVehicle(vehicle.LinkageTargetId, vehicle.CapacityCC, vehicle.FuelType)
-			if eerr == nil && len(engines) > 0 {
-				codes := service.MotorCodes(engines)
-				result["motorCodes"] = codes
-				// Convert to model type for cache
-				var engineDetails []mdl.EngineDetail
-				for _, e := range engines {
-					engineDetails = append(engineDetails, mdl.EngineDetail{
-						MotorCode:  e.MotorCode,
-						CC:         e.CC,
-						FuelType:   e.FuelType,
-						Cylinders:  e.Cylinders,
-						PowerHP:    e.PowerHP,
-						PowerKW:    e.PowerKW,
-						EngineType: e.EngineType,
-					})
-				}
-				result["engines"] = engineDetails
-			}
-		}
-
-		// Step 6: Get parts if vehicle found
+		// Step 5: Get parts if vehicle found.
 		parts, total, perr := h.parts.FindByLinkageTarget(vehicle.LinkageTargetId, "", 1, 20)
 		if perr == nil {
 			result["parts"] = parts
 			result["totalParts"] = total
 		}
 
-		// Step 7: Cross-brand suggestions
+		// Step 6: Cross-brand suggestions
 		siblings, _ := h.platform.FindSiblings(make, model)
 		if len(siblings) > 0 {
 			result["crossBrand"] = siblings
@@ -153,11 +129,14 @@ func (h *VINHandler) Decode(c *gin.Context) {
 	if t, ok := result["totalParts"]; ok {
 		cacheResult.TotalParts = t.(int)
 	}
-	if mc, ok := result["motorCodes"]; ok {
-		cacheResult.MotorCodes = mc.([]string)
+	if recalls, ok := result["recalls"]; ok {
+		cacheResult.Recalls = recalls.([]mdl.Recall)
 	}
-	if eng, ok := result["engines"]; ok {
-		cacheResult.Engines = eng.([]mdl.EngineDetail)
+	if len(allVariants) > 0 {
+		cacheResult.AllVariants = allVariants
+	}
+	if needsConfirmation, ok := result["needsConfirmation"].(bool); ok {
+		cacheResult.NeedsConfirmation = needsConfirmation
 	}
 	h.cache.Set(vin, cacheResult)
 

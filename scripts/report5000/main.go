@@ -545,8 +545,8 @@ func loadLocalParts() []PartInfo {
 	defer db.Close()
 
 	rows, err := db.Query(`
-		SELECT DISTINCT raw_number, description, brand_name 
-		FROM oem_search_index 
+		SELECT DISTINCT raw_number, description, brand_name
+		FROM oem_search_index
 		WHERE brand_name IN ('HYUNDAI/KIA', 'Hyundai / KIA')
 		ORDER BY raw_number`)
 	if err != nil {

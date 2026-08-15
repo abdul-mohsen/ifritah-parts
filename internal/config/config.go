@@ -1,50 +1,47 @@
 package config
 
 import (
-	"net"
+	"net/url"
 	"os"
 	"strings"
-
-	"github.com/go-sql-driver/mysql"
 )
 
 type Config struct {
-	// MySQL (TecDoc / dev_ifritah)
-	MySQLUser string
-	MySQLPass string
-	MySQLHost string
-	MySQLPort string
-	MySQLDB   string
+	PostgresURL      string
+	PostgresHost     string
+	PostgresPort     string
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
+	PostgresSSLMode  string
 
-	// Server
 	ServerPort string
-	BindAddr   string // e.g. "0.0.0.0" or "127.0.0.1"
-	DataDir    string // path to data/ folder with SQLite DBs
+	BindAddr   string
+	DataDir    string
 
-	// CORS
-	CORSOrigins []string // comma-separated allowed origins
-
-	// Elasticsearch
-	ElasticURL string
-
-	// NHTSA
-	NHTSABaseURL string
+	CORSOrigins     []string
+	ElasticURL      string
+	NHTSABaseURL    string
+	NHTSARecallsURL string
 }
 
 func Load() *Config {
 	origins := envOr("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000")
 	return &Config{
-		MySQLUser:    envOr("DBUSER", "root"),
-		MySQLPass:    envOr("PASSWORD", ""),
-		MySQLHost:    envOr("HOST", "127.0.0.1"),
-		MySQLPort:    envOr("DBPORT", "3306"),
-		MySQLDB:      envOr("DBNAME", "dev_ifritah"),
-		ServerPort:   envOr("PORT", "8080"),
-		BindAddr:     envOr("BIND_ADDR", "0.0.0.0"),
-		DataDir:      envOr("DATA_DIR", ""),
-		CORSOrigins:  splitCSV(origins),
-		ElasticURL:   envOr("ELASTIC_URL", "http://localhost:9200"),
-		NHTSABaseURL: envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
+		PostgresURL:      os.Getenv("DATABASE_URL"),
+		PostgresHost:     envOr("PGHOST", "127.0.0.1"),
+		PostgresPort:     envOr("PGPORT", "5432"),
+		PostgresUser:     envOr("PGUSER", "postgres"),
+		PostgresPassword: os.Getenv("PGPASSWORD"),
+		PostgresDB:       envOr("PGDATABASE", "parts_engine"),
+		PostgresSSLMode:  envOr("PGSSLMODE", "disable"),
+		ServerPort:       envOr("PORT", "8080"),
+		BindAddr:         envOr("BIND_ADDR", "0.0.0.0"),
+		DataDir:          envOr("DATA_DIR", ""),
+		CORSOrigins:      splitCSV(origins),
+		ElasticURL:       envOr("ELASTIC_URL", "http://localhost:9200"),
+		NHTSABaseURL:     envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
+		NHTSARecallsURL:  envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
 	}
 }
 
@@ -59,17 +56,20 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func (c *Config) MySQLDSN() string {
-	cfg := mysql.NewConfig()
-	cfg.User = c.MySQLUser
-	cfg.Passwd = c.MySQLPass
-	cfg.Net = "tcp"
-	cfg.Addr = net.JoinHostPort(c.MySQLHost, c.MySQLPort)
-	cfg.DBName = c.MySQLDB
-	cfg.ParseTime = true
-	cfg.Params = map[string]string{"charset": "utf8mb4"}
-	cfg.InterpolateParams = true
-	return cfg.FormatDSN()
+func (c *Config) PostgresDSN() string {
+	if c.PostgresURL != "" {
+		return c.PostgresURL
+	}
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.PostgresUser, c.PostgresPassword),
+		Host:   c.PostgresHost + ":" + c.PostgresPort,
+		Path:   c.PostgresDB,
+	}
+	q := u.Query()
+	q.Set("sslmode", c.PostgresSSLMode)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func envOr(key, fallback string) string {

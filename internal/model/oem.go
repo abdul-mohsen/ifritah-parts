@@ -27,6 +27,9 @@ type Recall struct {
 	Consequence         string `json:"consequence,omitempty"`
 	Remedy              string `json:"remedy,omitempty"`
 	ReportDate          string `json:"reportDate,omitempty"`
+	SourceLabel         string `json:"sourceLabel"`
+	SourceURL           string `json:"sourceUrl"`
+	Warning             string `json:"warning,omitempty"`
 }
 
 // SearchResult is a unified search response (parts, OEM, text).

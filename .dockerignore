@@ -1,27 +1,75 @@
-# Build artifacts
+# Files excluded from `docker build` context.
+#
+# Runtime DBs (auto-created by the server) and huge build-time inputs are
+# excluded so the single-container image stays small (~350 MB base + ~85 MB
+# of prebuilt SQLite / JSON data).
+
+# ── Version control ──────────────────────────────────────
+.git/
+.github/
+
+# ── OS / IDE ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Local env ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Build outputs / native binaries ──────────────────────
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+server
+server.exe
+*.log
+*.pid
 
-# Data (mounted as volume)
-data/
-
-# Frontend node_modules (rebuilt in Docker)
+# ── Frontend rebuild artifacts ───────────────────────────
 frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 
-# Debug / report files
+# ── QA / probe outputs (regenerated each run) ────────────
+qa/e2e-report/
+qa/harsh-probe*.json
+
+# ── Runtime-created SQLite files (not source-of-truth) ───
+data/*.db-wal
+data/*.db-shm
+data/worker_contributions.db
+data/external_sources.db
+
+# ── Build-time input NOT needed at runtime ───────────────
+# epa_vehicles.db is built from vehicles.csv by scripts/build_epa_db.py;
+# only the .db goes into the image.
+data/vehicles.csv
+
+# ── Debug scratch (never in the image) ───────────────────
 debug_*.html
 *_output*.txt
-*.csv
 report*.txt
 coverage_out.txt
 still_not_found.txt
 not_found_*.txt
 qa_*.txt
 estimate_output.txt
+scripts/debug_html/
+scripts/extract_rockauto/*.html
+scripts/extract_rockauto/*_ctx.txt
+scripts/extract_rockauto/*_results.txt
+scripts/research_sources/*.html
+scripts/research_sources/*.txt
+scripts/scrape_rockauto/rockauto_collection.txt
 
-# OS junk
-.DS_Store
-Thumbs.db
+# ── Docs / reports never used at runtime ─────────────────
+docs/
+README.md
+ARCHITECTURE.md
+BUGS.md

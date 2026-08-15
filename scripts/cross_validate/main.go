@@ -231,7 +231,7 @@ func main() {
 	clearCache()
 
 	// Phase 4: Run cross-validation tests
-	fmt.Println("Phase 3: Running cross-validation tests...\n")
+	fmt.Println("Phase 3: Running cross-validation tests...")
 	results := runTests(testSet)
 
 	// Phase 5: Report

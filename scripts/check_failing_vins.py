@@ -62,14 +62,14 @@ def decode_vin(vin):
     vin = vin.upper()
     wmi = vin[:3]
     year = year_codes.get(vin[9], 0)
-    
+
     # Find WMI
     c.execute("SELECT Id, MakeId FROM Wmi WHERE Wmi = ?", (wmi,))
     row = c.fetchone()
     if not row:
         return None
     wmi_id, make_id = row
-    
+
     # Get make
     make = ''
     if make_id:
@@ -79,7 +79,7 @@ def decode_vin(vin):
         r = c.fetchone()
         if r:
             make = lookups['Make'].get(r[0], '')
-    
+
     # Find schemas
     c.execute("""
         SELECT DISTINCT VinSchemaId FROM Wmi_VinSchema
@@ -88,7 +88,7 @@ def decode_vin(vin):
     schema_ids = [r[0] for r in c.fetchall()]
     if not schema_ids:
         return {'make': make, 'model': '', 'year': year}
-    
+
     # Get patterns
     placeholders = ','.join(['?'] * len(schema_ids))
     c.execute(f"""
@@ -97,7 +97,7 @@ def decode_vin(vin):
         WHERE p.VinSchemaId IN ({placeholders})
         AND e.Code IN ('Make','Model','BodyClass','DriveType','FuelTypePrimary','PlantCountry','VehicleType','DisplacementL','EngineCylinders')
     """, schema_ids)
-    
+
     result = {'make': make, 'model': '', 'year': year}
     for keys, elem_id, attr_id, lookup_table in c.fetchall():
         if not match_keys(vin, keys):
@@ -110,10 +110,10 @@ def decode_vin(vin):
                 value = attr_id
         else:
             value = attr_id
-        
+
         if code == 'Model' and not result.get('model'):
             result['model'] = value
-    
+
     return result
 
 # Test the failing VINs

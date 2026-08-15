@@ -140,6 +140,9 @@ func (t *TecDoc) SearchByKeyword(keyword string, limit int) ([]model.OEMReferenc
 	}
 
 	// Use MATCH ... AGAINST in boolean mode for fulltext search
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	query := `
 		SELECT
 			si.legacyArticleId,
@@ -152,7 +155,7 @@ func (t *TecDoc) SearchByKeyword(keyword string, limit int) ([]model.OEMReferenc
 		WHERE MATCH(si.keywords) AGAINST(? IN BOOLEAN MODE)
 		LIMIT ?`
 
-	rows, err := logQuery(t.db, "TecDoc.SearchByKeyword", query, keyword, limit)
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.SearchByKeyword", query, keyword, limit)
 	if err != nil {
 		return nil, fmt.Errorf("keyword search: %w", err)
 	}

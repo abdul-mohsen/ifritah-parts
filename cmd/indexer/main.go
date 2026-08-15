@@ -42,7 +42,10 @@ type oemDoc struct {
 
 func main() {
 	cfg := config.Load()
-	pool := pedb.NewMySQL(cfg)
+	pool := pedb.NewPostgres(cfg)
+	if pool == nil {
+		log.Fatal("PostgreSQL connection is required")
+	}
 	defer pool.Close()
 
 	esURL := cfg.ElasticURL
@@ -129,9 +132,9 @@ func indexParts(pool *sql.DB, esURL string) {
 	defer cancel()
 
 	rows, err := pool.QueryContext(ctx, `
-		SELECT linkageTargetId, legacyArticleId, articleNumber,
-		       brandName, description, category,
-		       assemblyGroupNodeId, modelSeriesName, manuId
+		SELECT linking_target_id, legacy_article_id, article_number,
+		       brand_name, generic_article_desc, category_name,
+		       assembly_group_node_id, model_name, manu_id
 		FROM hk_parts_cache
 	`)
 	if err != nil {
@@ -193,8 +196,8 @@ func indexOEM(pool *sql.DB, esURL string) {
 	defer cancel()
 
 	rows, err := pool.QueryContext(ctx, `
-		SELECT raw_number, normalized, source,
-		       article_id, article_number, brand_name, description
+		SELECT raw_number, normalized, source_table,
+		       legacy_article_id, article_number, brand_name, description
 		FROM oem_search_index LIMIT 5000000
 	`)
 	if err != nil {

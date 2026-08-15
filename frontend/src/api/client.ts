@@ -8,6 +8,7 @@ import type {
   CategoryTreeResponse,
   AlternativesResponse,
   PlatformResponse,
+  PartDetailResponse,
 } from '../types';
 
 const BASE = '/api';
@@ -36,7 +37,6 @@ export async function getPartsForVehicle(
   page = 1,
   limit = 20,
   category = '',
-  _motorCodes: string[] = [],
   enrich = false,
 ): Promise<PartsResponse> {
   const params = new URLSearchParams({
@@ -52,12 +52,6 @@ export async function getCategories(
   linkageTargetId: number,
 ): Promise<CategoriesResponse> {
   return request(`/vehicle/${linkageTargetId}/categories`);
-}
-
-export async function getEngineInfo(
-  linkageTargetId: number,
-): Promise<{ linkageTargetId: number; motorCodes: string[]; engines: any[]; total: number }> {
-  return request(`/vehicle/${linkageTargetId}/engine`);
 }
 
 export async function searchOEM(
@@ -112,6 +106,16 @@ export async function getAlternatives(
   const params = new URLSearchParams({ limit: String(limit) });
   if (vehicleId) params.set('vehicleId', String(vehicleId));
   return request(`/part/${legacyArticleId}/alternatives?${params}`);
+}
+
+export async function getPartDetail(
+  legacyArticleId: number,
+  vehicleId?: number,
+): Promise<PartDetailResponse> {
+  const params = new URLSearchParams();
+  if (vehicleId) params.set('vehicleId', String(vehicleId));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return request(`/part/${legacyArticleId}/detail${suffix}`);
 }
 
 export async function getPlatformSiblings(

@@ -46,13 +46,24 @@ export interface Recall {
   consequence?: string;
   remedy?: string;
   reportDate?: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  warning?: string;
 }
 
 export interface SupersessionLink {
   legacyArticleId: number;
   articleNumber: string;
   brandName?: string;
-  direction: 'replaced_by' | 'replaces';
+  description?: string;
+  direction: 'replaced_by' | 'replaces' | 'reported_replacement' | 'reported_predecessor' | 'reported_related';
+  confidence: number;
+  source: {
+    kind: string;
+    label: string;
+    detail: string;
+  };
+  warnings?: string[];
 }
 
 export interface NHTSAVehicle {
@@ -66,16 +77,6 @@ export interface NHTSAVehicle {
   engineNumberOfCylinders?: string;
 }
 
-export interface EngineDetail {
-  motorCode: string;
-  cc: number;
-  fuelType?: string;
-  cylinders?: number;
-  powerHP?: number;
-  powerKW?: number;
-  engineType?: string;
-}
-
 export interface VINDecodeResponse {
   vin: string;
   nhtsaRaw?: NHTSAVehicle;
@@ -84,8 +85,6 @@ export interface VINDecodeResponse {
   totalParts?: number;
   crossBrand?: CrossBrandHit[];
   recalls?: Recall[];
-  motorCodes?: string[];
-  engines?: EngineDetail[];
   allVariants?: Vehicle[];
   needsConfirmation?: boolean;
 }
@@ -245,4 +244,119 @@ export interface EnrichedPart extends Part {
   oemNumbers?: string[];
   criteria?: PartCriterion[];
   alternatives?: number;
+}
+
+export type PartSourceKind =
+  | 'owned_catalog'
+  | 'smart_search'
+  | 'oem_crossref'
+  | 'derived_inference'
+  | 'external_source';
+
+export type PartConfidenceBand = 'high' | 'medium' | 'low';
+
+export interface PartDetailSource {
+  kind: PartSourceKind;
+  label: string;
+  detail: string;
+}
+
+export interface PartDetailQuality {
+  provenanceComplete: boolean;
+  provenanceGaps?: string[];
+  hasOEMNumbers: boolean;
+  hasCriteria: boolean;
+  hasVehicleContext?: boolean;
+  hasFitmentEvidence?: boolean;
+  hasPlacement?: boolean;
+  placementExact?: boolean;
+  hasReplacementCandidates?: boolean;
+}
+
+export type PartPlacementKind = 'exact' | 'catalog_group' | 'inferred' | 'unavailable';
+export type PartPlacementType = 'diagram' | 'text_hint' | 'catalog_group' | 'none';
+
+export interface PartPlacementSource {
+  kind: PartSourceKind;
+  label: string;
+  detail: string;
+}
+
+export interface PartPlacement {
+  kind: PartPlacementKind;
+  placementType: PartPlacementType;
+  title: string;
+  summary: string;
+  locationArea?: string;
+  imageUrl?: string;
+  thumbnailUrl?: string;
+  hints?: string[];
+  warnings?: string[];
+  confidence: number;
+  source: PartPlacementSource;
+}
+
+export interface PartDetailAlternative extends Part {
+  sharedVehicles?: number;
+}
+
+export type PartReplacementCandidateType = 'shared_oem_reference' | 'catalog_compatible' | 'aftermarket_alternative' | 'substitution';
+
+export interface PartReplacementCandidate {
+  legacyArticleId: number;
+  articleNumber: string;
+  description: string;
+  brandName?: string;
+  category?: string;
+  assemblyGroupId?: number;
+  candidateType: PartReplacementCandidateType;
+  explanation: string;
+  oemReference?: string;
+  confidence: number;
+  source: PartDetailSource;
+  warnings?: string[];
+}
+
+export interface PartDetailViewModel {
+  legacyArticleId: number;
+  articleNumber: string;
+  description: string;
+  brandName?: string;
+  category?: string;
+  oemNumbers: string[];
+  criteria?: Record<string, string>;
+  fitVehicles?: Vehicle[];
+  replacements?: PartReplacementCandidate[];
+  alternatives?: PartDetailAlternative[];
+  placement?: PartPlacement;
+  confidence: number;
+  confidenceBand: PartConfidenceBand;
+  confidenceReason: string;
+  fitmentDriver?: string;
+  source: PartDetailSource;
+  warnings?: string[];
+  quality: PartDetailQuality;
+}
+
+export interface PartDetailResponse {
+  legacyArticleId: number;
+  vehicleId?: number;
+  articleNumber: string;
+  description: string;
+  brandName?: string;
+  category?: string;
+  assemblyGroupId?: number;
+  oemNumbers?: string[];
+  criteria?: Record<string, string>;
+  fitVehicles?: Vehicle[];
+  replacements?: PartReplacementCandidate[];
+  alternatives?: PartDetailAlternative[];
+  placement?: PartPlacement;
+  source: PartDetailSource;
+  confidence: {
+    score: number;
+    reason: string;
+  };
+  quality: PartDetailQuality;
+  warnings?: string[];
 }

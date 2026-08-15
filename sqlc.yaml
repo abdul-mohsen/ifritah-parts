@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries:
+      - "db/queries/catalog.sql"
+      - "db/queries/external_sources.sql"
+    gen:
+      go:
+        package: "store"
+        out: "internal/store"
+        sql_package: "database/sql"
+        emit_interface: true
+        emit_empty_slices: true

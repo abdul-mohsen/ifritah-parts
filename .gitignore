@@ -1,3 +1,62 @@
+# Local environment and secrets
 .env
+.env.*
+!.env.example
+
+# Build artifacts and local databases
 *.exe
-*.txt
+*.exe~
+*.dll
+*.so
+*.dylib
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# The tracked pre-built SQLite/JSON seed data lives under data/. We only
+# want to ignore RUNTIME-generated files inside data/, not the shipped
+# seed. `!` re-includes tracked seed by name explicitly.
+data/*.db-wal
+data/*.db-shm
+data/worker_contributions.db
+data/external_sources.db
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+
+# Generated reports and debug output
+*_output*.txt
+**/test_results.txt
+debug_*.html
+*.csv
+report*.txt
+coverage_out.txt
+still_not_found.txt
+not_found_*.txt
+qa_*.txt
+estimate_output.txt
+
+# Runtime logs from scripts/dev-server.ps1
+logs/
+
+# Playwright audit outputs (screenshots, HAR, trace files — regenerated per run)
+qa/e2e-report/
+qa/harsh-probe*.json
+qa/harsh-probe.md
+
+# Captured research and debug inputs
+scripts/debug_html/
+scripts/extract_rockauto/*.html
+scripts/extract_rockauto/*_ctx.txt
+scripts/extract_rockauto/*_results.txt
+scripts/research_sources/*.html
+scripts/research_sources/*.txt
+scripts/scrape_rockauto/rockauto_collection.txt
+
+# OS-specific files
+.DS_Store
+Thumbs.db

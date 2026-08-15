@@ -1,15 +1,15 @@
 # Check various Thai manufacturer WMIs
 $vins = @(
     "MHFBA1AA0HA000001",  # MHF - unknown
-    "MHSBA1AA0HA000001",  # MHS 
+    "MHSBA1AA0HA000001",  # MHS
     "MHKBA1AA0HA000001",  # MHK
     "MR0BA1AA0HA000001",  # MR0 - Toyota Thailand
     "MHRBA1AA0HA000001",  # MHR - Honda Thailand
     "MNBBA1AA0HA000001",  # MNB - Ford Thailand
-    "MNTBA1AA0HA000001",  # MNT - Nissan Thailand  
+    "MNTBA1AA0HA000001",  # MNT - Nissan Thailand
     "MMABA1AA0HA000001",  # MMA - Mitsubishi Thailand
     "MMBBA1AA0HA000001",  # MMB - Mitsubishi Thailand
-    "MBHBA1AA0HA000001",  # MBH 
+    "MBHBA1AA0HA000001",  # MBH
     "MBJBA1AA0HA000001",  # MBJ - Toyota Thailand?
     "MBKBA1AA0HA000001",  # MBK
     "MHCBA1AA0HA000001",  # MHC
