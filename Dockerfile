@@ -99,8 +99,10 @@ ENV BIND_ADDR=0.0.0.0 \
     NHTSA_URL=https://vpic.nhtsa.dot.gov/api \
     NHTSA_RECALLS_URL=https://api.nhtsa.gov/recalls
 
-# 8080 for the HTTP API + SPA. 5432 for direct SQL access — remove this line
-# to keep the DB purely internal.
+# 8080 for the HTTP API + SPA. The container ALWAYS listens on 8080; the
+# host-side port is picked at run time (docker-compose reads $PORT from .env
+# and maps HOST:$PORT → CONTAINER:8080). 5432 exposes the embedded postgres
+# for direct SQL access — remove this line to keep the DB purely internal.
 EXPOSE 8080 5432
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=30s \
