@@ -27,7 +27,14 @@ services:
       POSTGRES_USER: ${PGUSER:-parts}
       POSTGRES_PASSWORD: ${PGPASSWORD:-parts_engine_pw}
       POSTGRES_DB: ${PGDATABASE:-parts_engine}
+      # The Go server ALWAYS listens on 8080 inside the container. `.env`'s
+      # PORT is only used to pick the HOST-side port for the mapping below.
+      # This override intentionally beats whatever PORT is in `.env` so we
+      # never end up with docker forwarding to a port the server isn't on.
+      PORT: '8080'
     ports:
+      # HOST:CONTAINER — .env picks the host port (8081 in your case),
+      # container port is fixed at 8080.
       - "${PORT:-8080}:8080"
       # Expose the embedded postgres for direct SQL access (psql, DBeaver, sqlc gen).
       # Remove this line if you want the DB purely internal.
@@ -40,7 +47,9 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      # Healthcheck runs INSIDE the container, so it always hits :8080 —
+      # the container's fixed internal port.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
