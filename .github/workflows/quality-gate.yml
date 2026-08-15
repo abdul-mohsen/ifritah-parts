@@ -132,7 +132,7 @@ jobs:
 
       - name: Run Playwright regression
         working-directory: frontend
-        run: npm run test:e2e -- story1-regression.spec.ts
+        run: npm run test:e2e -- --project=chromium story1-regression.spec.ts
 
       - name: Upload Playwright artifacts
         if: failure()

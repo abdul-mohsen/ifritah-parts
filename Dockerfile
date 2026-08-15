@@ -38,7 +38,7 @@ RUN npm run build
 #      still resolve modules from source.
 FROM golang:1.25 AS builder
 WORKDIR /src
-ENV GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux
+ENV CGO_ENABLED=0 GOOS=linux
 COPY go.mod go.sum ./
 # --mount=type=cache reuses the module cache across builds when BuildKit is on.
 # `|| GOPROXY=direct go mod download` is a fallback for networks that block
