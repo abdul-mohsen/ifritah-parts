@@ -184,6 +184,22 @@ func main() {
 		AllowCredentials: corsAllowCredentials,
 	}))
 
+	// internalAuth guards /api/internal/* routes with a static bearer token.
+	// Set INTERNAL_API_KEY in the environment. When the key is empty the
+	// middleware disables all internal routes entirely (503).
+	internalAuth := func(c *gin.Context) {
+		if cfg.InternalAPIKey == "" {
+			c.AbortWithStatusJSON(503, gin.H{"error": "internal API not configured"})
+			return
+		}
+		auth := c.GetHeader("Authorization")
+		if auth != "Bearer "+cfg.InternalAPIKey {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Next()
+	}
+
 	api := r.Group("/api")
 	{
 		api.POST("/vin/decode", vinH.Decode)
@@ -206,13 +222,13 @@ func main() {
 		api.GET("/catalog/groups", catalogH.Groups)
 		api.GET("/catalog/parts", catalogH.GroupParts)
 
-		internal := api.Group("/internal/worker")
+		internal := api.Group("/internal/worker", internalAuth)
 		{
 			internal.POST("/replacements", workerH.SubmitReplacement)
 			internal.GET("/replacements", workerH.ListReplacements)
 			internal.POST("/replacements/:id/review", workerH.ReviewReplacement)
 		}
-		media := api.Group("/internal/media/commons")
+		media := api.Group("/internal/media/commons", internalAuth)
 		{
 			media.POST("", commonsMediaH.Submit)
 			media.GET("", commonsMediaH.List)

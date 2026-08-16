@@ -80,7 +80,28 @@ type SmartSearchResponse struct {
 // Search runs the smart search engine.
 // It detects query type (OEM number, part number, category text, VIN),
 // then applies category-aware filtering with cross-reference expansion.
+//
+// This is the outer entry point. It delegates to searchDispatch and then runs
+// a single global deduplication pass over the results so no downstream strategy
+// can leak a duplicate legacyArticleId (S0-T2, fixes BUG-2/7/8/12).
 func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, fuelType string, category string, page, limit int) (*SmartSearchResponse, error) {
+	resp, err := s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	if resp != nil {
+		before := len(resp.Results)
+		resp.Results = dedupeByArticleId(resp.Results)
+		if len(resp.Results) != before {
+			log.Printf("[SmartSearch.Search] dedupeByArticleId removed %d duplicate(s)", before-len(resp.Results))
+		}
+		resp.Total = len(resp.Results)
+	}
+	return resp, err
+}
+
+// searchDispatch holds the actual strategy-selection cascade. It is the pre-S0-T2
+// body of Search; kept intact so downstream returns can continue to build a
+// response with whatever total count they compute — dedupeByArticleId in Search()
+// will normalize resp.Total against the final unique-result slice.
+func (s *SmartSearch) searchDispatch(query string, linkageTargetId int, vehicleCC int, fuelType string, category string, page, limit int) (*SmartSearchResponse, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
@@ -140,7 +161,25 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 		}
 		return resp, nil
 	case linkageTargetId > 0:
-		return s.searchByVehicle(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		// S0-T3: always run the vehicle search first. If it returns results, return them.
+		// If it returns zero results AND the query is non-empty text (BUG-3), merge in a
+		// text-search pass so the user still gets results instead of nil.
+		vResp, vErr := s.searchByVehicle(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		if vErr != nil {
+			return vResp, vErr
+		}
+		if vResp.Total > 0 || strings.TrimSpace(query) == "" {
+			return vResp, nil
+		}
+		// Vehicle search missed with a text query — fall back to text search and tag results.
+		textResp, textErr := s.searchByText(query, vehicleCC, fuelType, page, limit)
+		if textErr != nil || textResp.Total == 0 {
+			// Return the empty vehicle response (preserves vehicle context + categories).
+			return vResp, nil
+		}
+		textResp.Warnings = append(textResp.Warnings,
+			"No vehicle-linked parts found; showing text-search results — vehicle fitment not confirmed")
+		return textResp, nil
 	default:
 		return s.searchByText(query, vehicleCC, fuelType, page, limit)
 	}
@@ -577,6 +616,38 @@ buildResults:
 
 	resp.Total = len(resp.Results)
 	return resp, nil
+}
+
+// dedupeByArticleId removes duplicate SmartResult entries whose
+// Part.LegacyArticleId matches an earlier entry. First occurrence wins.
+//
+// Entries with LegacyArticleId == 0 (online lookups, dealer scrapes,
+// aftermarket_crossref_only responses that carry no TecDoc article id) are kept
+// as-is because they cannot be reliably deduplicated by id — de-duplication of
+// those would require string-normalized brand+articleNumber compare, out of
+// scope for S0-T2.
+//
+// This is the single global dedup hook for S0-T2 (fixes BUG-2, BUG-7, BUG-8,
+// BUG-12: same legacyArticleId appearing twice in results).
+func dedupeByArticleId(results []SmartResult) []SmartResult {
+	if len(results) < 2 {
+		return results
+	}
+	seen := make(map[int]bool, len(results))
+	out := make([]SmartResult, 0, len(results))
+	for _, r := range results {
+		if r.LegacyArticleId == 0 {
+			// No reliable id to key on — pass through.
+			out = append(out, r)
+			continue
+		}
+		if seen[r.LegacyArticleId] {
+			continue
+		}
+		seen[r.LegacyArticleId] = true
+		out = append(out, r)
+	}
+	return out
 }
 
 func sortOEMReferences(refs []model.OEMReference, query string) {
@@ -1040,13 +1111,25 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 
 	resp.Total = len(resp.Results)
 
-	// TecDoc fulltext search fallback (searchindex 5.8M rows)
+	// TecDoc fulltext search fallback (searchindex 5.8M rows).
+	// S0-T4: gate results by category token. Classify the query text to get the
+	// expected category; reject any returned article whose description does not
+	// match that category. This prevents BUG-1 (e.g. "oil filter" returning
+	// fuel filters or engine mounts via tecdoc_keyword).
 	if len(resp.Results) == 0 && s.tecdoc != nil {
 		tdRefs, tdErr := s.tecdoc.SearchByKeyword(text, limit)
 		if tdErr == nil && len(tdRefs) > 0 {
+			queryRule := ClassifyCategory(text)
 			resp.SearchStrategy = "tecdoc_fulltext"
 			for _, ref := range tdRefs {
-				rule := ClassifyCategory(ref.Description)
+				artRule := ClassifyCategory(ref.Description)
+				// Hard gate: reject the result when the query has a clear category
+				// (not FitUniversal) and the article maps to a different category.
+				if queryRule.Driver != FitUniversal && artRule.Driver != queryRule.Driver {
+					log.Printf("[searchByText] tecdoc_fulltext gated out %q (query_driver=%v article_driver=%v)",
+						ref.Description, queryRule.Driver, artRule.Driver)
+					continue
+				}
 				result := SmartResult{
 					Part: model.Part{
 						LegacyArticleId: ref.LegacyArticleId,
@@ -1056,7 +1139,7 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 					},
 					Confidence:     0.55,
 					ConfidenceNote: "TecDoc fulltext search (no vehicle context)",
-					FitmentDriver:  driverName(rule.Driver),
+					FitmentDriver:  driverName(artRule.Driver),
 					BrandResolved:  ref.BrandName,
 				}
 				resp.Results = append(resp.Results, result)
