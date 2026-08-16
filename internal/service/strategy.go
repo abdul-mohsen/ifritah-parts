@@ -97,11 +97,10 @@ func (s *SmartSearch) AvailableModes() []SearchMode {
 		{Key: "cross_brand", Name: "Cross Brand", Description: "Hyundai ↔ Kia platform equivalents — parts that fit both brands"},
 		{Key: "combined", Name: "Smart Search", Description: "Automatically runs all strategies in parallel and merges the best results"},
 	}
-	// Conditionally add modes that require TecDoc services
+	// Conditionally add modes that require TecDoc services.
+	// Guard: tecDocSpecs is the minimum requirement for spec-based modes.
 	if s.tecDocSpecs != nil {
 		modes = append(modes, SearchMode{Key: "spec_match", Name: "Spec Match", Description: "Find parts sharing the same physical specifications (thread, diameter, pressure) as your input"})
-	}
-	if s.tecDocVehicle != nil {
 		modes = append(modes,
 			SearchMode{Key: "assembly_context", Name: "Sub-Parts", Description: "Give a parent component — get all sub-parts that physically fit it"},
 			SearchMode{Key: "vin_assembly", Name: "Vehicle Spec Match", Description: "VIN or vehicle → derive compatible parts from engine and chassis specs, not just the parts database"},
@@ -111,6 +110,8 @@ func (s *SmartSearch) AvailableModes() []SearchMode {
 }
 
 // strategyForMode returns the SearchStrategy for a given mode key.
+// Guard: tecDocSpecs is the minimum requirement for spec-based modes;
+// all three (spec_match, assembly_context, vin_assembly) use it.
 func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 	switch mode {
 	case "exact_oem":
@@ -123,21 +124,18 @@ func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 		return &SupersessionStrategy{search: s}
 	case "cross_brand":
 		return &CrossBrandStrategy{search: s}
-	case "spec_match":
+	case "spec_match", "assembly_context", "vin_assembly":
 		if s.tecDocSpecs == nil {
 			return nil
 		}
-		return &SpecMatchStrategy{search: s}
-	case "assembly_context":
-		if s.tecDocSpecs == nil {
-			return nil
+		switch mode {
+		case "spec_match":
+			return &SpecMatchStrategy{search: s}
+		case "assembly_context":
+			return &AssemblyContextStrategy{search: s}
+		case "vin_assembly":
+			return &VinAssemblyStrategy{search: s}
 		}
-		return &AssemblyContextStrategy{search: s}
-	case "vin_assembly":
-		if s.tecDocSpecs == nil {
-			return nil
-		}
-		return &VinAssemblyStrategy{search: s}
 	}
 	return nil
 }
@@ -171,10 +169,8 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		strategies = append(strategies,
 			&SpecMatchStrategy{search: s},
 			&AssemblyContextStrategy{search: s},
+			&VinAssemblyStrategy{search: s}, // requires tecDocSpecs same as assembly
 		)
-	}
-	if s.tecDocVehicle != nil {
-		strategies = append(strategies, &VinAssemblyStrategy{search: s})
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -216,18 +212,23 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		close(resultCh)
 	}()
 
-	// Collect results
+	// Collect and merge results
+	// Priority lookup: populated when a strategy sends to resultCh
+	priorities := make(map[string]float64)
 	seen := make(map[int]SmartResult)
 	var order []int
 
 	for sr := range resultCh {
+		priorities[sr.name] = sr.priority
 		for _, r := range sr.results {
 			if r.LegacyArticleId <= 0 {
 				continue
 			}
 			if existing, ok := seen[r.LegacyArticleId]; ok {
 				// Convergence bonus: same article from ≥2 strategies
-				r.Confidence = max64(r.Confidence, existing.Confidence) * 1.05
+				// Cap at 1.0 to keep confidence meaningful.
+				bonus := min64(max64(r.Confidence, existing.Confidence)*1.05, 1.0)
+				r.Confidence = bonus
 				if !strings.Contains(existing.SourceStrategy, r.SourceStrategy) {
 					r.SourceStrategy = existing.SourceStrategy + "," + r.SourceStrategy
 				}
@@ -239,7 +240,7 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		}
 	}
 
-	// Rank: score = confidence × priority (priority from strategy, confidence from result)
+	// Rank: score = confidence × strategy priority
 	results := make([]SmartResult, 0, len(seen))
 	for _, id := range order {
 		if r, ok := seen[id]; ok {
@@ -247,7 +248,12 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		}
 	}
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Confidence > results[j].Confidence
+		// Parse the first strategy from comma-joined SourceStrategy to get its priority
+		pi := strategyPriority(results[i].SourceStrategy, priorities)
+		pj := strategyPriority(results[j].SourceStrategy, priorities)
+		si := results[i].Confidence * pi
+		sj := results[j].Confidence * pj
+		return si > sj
 	})
 	if len(results) > limit {
 		results = results[:limit]
@@ -269,37 +275,58 @@ func max64(a, b float64) float64 {
 	return b
 }
 
-// ─── Circuit breaker (S4-T5) ─────────────────────────────────────────────────
+func min64(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
 
-var (
-	strategyFailures  sync.Map // string → *atomic.Int64
-	strategyDisabled  sync.Map // string → time.Time
+// strategyPriority returns the priority for the first strategy name in a
+// comma-joined source string, falling back to 0.5 when not found.
+func strategyPriority(source string, priorities map[string]float64) float64 {
+	first := source
+	if idx := strings.Index(source, ","); idx >= 0 {
+		first = source[:idx]
+	}
+	if p, ok := priorities[first]; ok {
+		return p
+	}
+	return 0.5
+}
+
+// ─── Circuit breaker (S4-T5) ─────────────────────────────────────────────────
+//
+// State is stored on SmartSearch (not package globals) so multiple instances
+// in tests do not share breaker state.
+
+const (
 	cbFailureThreshold int64 = 3
-	cbCooldown             = 60 * time.Second
+	cbCooldown               = 60 * time.Second
 )
 
 func (s *SmartSearch) circuitOpen(name string) bool {
-	if v, ok := strategyDisabled.Load(name); ok {
+	if v, ok := s.cbDisabled.Load(name); ok {
 		if t, ok := v.(time.Time); ok && time.Now().Before(t) {
 			return true
 		}
-		strategyDisabled.Delete(name)
+		s.cbDisabled.Delete(name)
 	}
 	return false
 }
 
 func (s *SmartSearch) recordStrategyFailure(name string) {
-	actual, _ := strategyFailures.LoadOrStore(name, new(atomic.Int64))
+	actual, _ := s.cbFailures.LoadOrStore(name, new(atomic.Int64))
 	cnt := actual.(*atomic.Int64).Add(1)
 	if cnt >= cbFailureThreshold {
-		strategyDisabled.Store(name, time.Now().Add(cbCooldown))
+		s.cbDisabled.Store(name, time.Now().Add(cbCooldown))
 		actual.(*atomic.Int64).Store(0)
 		log.Printf("[CircuitBreaker] strategy=%s tripped — disabled for %v", name, cbCooldown)
 	}
 }
 
 func (s *SmartSearch) recordStrategySuccess(name string) {
-	if v, ok := strategyFailures.Load(name); ok {
+	if v, ok := s.cbFailures.Load(name); ok {
 		v.(*atomic.Int64).Store(0)
 	}
 }

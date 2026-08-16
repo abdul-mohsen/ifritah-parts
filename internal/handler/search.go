@@ -48,6 +48,10 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if result == nil {
+		c.JSON(http.StatusOK, gin.H{"query": q, "results": []interface{}{}, "total": 0, "searchStrategy": "none"})
+		return
+	}
 
 	log.Printf("[SearchHandler] <<< OK strategy=%q mode=%q results=%d elapsed=%v",
 		result.SearchStrategy, result.Mode, result.Total, time.Since(start))
@@ -99,6 +103,9 @@ func (h *SearchHandler) CrossRef(c *gin.Context) {
 	if oerr != nil && verr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": oerr.Error()})
 		return
+	}
+	if verr != nil {
+		log.Printf("[CrossRef] GetVehiclesForArticle id=%d err=%v", id, verr)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

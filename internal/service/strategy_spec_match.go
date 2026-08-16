@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"strings"
@@ -39,9 +40,12 @@ func (st *SpecMatchStrategy) Search(ctx context.Context, req StrategyRequest) ([
 		return nil, fmt.Errorf("spec_match requires TecDoc specifications service")
 	}
 
-	// Step 1: resolve OEM → legacyArticleId for the seed article
+	// Step 1: resolve OEM → legacyArticleId + specs for the seed article
 	seedId, seedSpecs, err := st.resolveSeedSpecs(ctx, req)
-	if err != nil || seedId <= 0 || len(seedSpecs) == 0 {
+	if err != nil {
+		return nil, err // propagate, not swallow
+	}
+	if len(seedSpecs) == 0 {
 		return nil, nil
 	}
 
@@ -146,71 +150,95 @@ type SpecMatchResult struct {
 }
 
 // FindBySpecMatch queries articlecriteria in reverse: find all articles whose
-// mandatory spec values match those of the seed article.
-// Only isMandatory=1 criteria are used as filters — soft criteria are informational only.
+// spec values match those of the provided specs.
+//
+// seedId is the article to EXCLUDE from results (pass 0 to exclude nothing).
+// This allows both "find alternatives for a known article" (seedId > 0) and
+// "find articles matching derived specs from a parent assembly" (seedId = 0).
+//
+// Only specs with CriteriaType == "1" (mandatory in TecDoc) are used as hard
+// filters. Soft specs are not used as SQL filters.
 func (s *TecDocSpecifications) FindBySpecMatch(ctx context.Context, seedId int, seedSpecs []model.Specification, limit int) ([]SpecMatchResult, error) {
 	if s.repo == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
-	if seedId <= 0 || len(seedSpecs) == 0 {
+	if len(seedSpecs) == 0 {
 		return nil, nil
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
 
-	// Build the mandatory spec pairs as a filter
-	// We join articlecriteria against itself: for each mandatory spec of the seed,
-	// find articles that have the same criteriaDescription + rawValue.
-	// Result is the intersection: articles matching ALL mandatory specs.
-	type specPair struct {
-		name  string
-		value string
-	}
-	var mandatoryPairs []specPair
+	// Collect mandatory specs only (CriteriaType == "1").
+	// Fall back to all provided specs when none are flagged mandatory.
+	type specPair struct{ name, value string }
+	var mandatory []specPair
 	for _, sp := range seedSpecs {
-		if sp.CriteriaType == "1" || sp.Source == "tecdoc:articlecriteria" {
-			// Use all specs from TecDoc as potential matches; rely on hard-constraint
-			// names to be kept by the caller. Here we include all of them.
-			mandatoryPairs = append(mandatoryPairs, specPair{sp.Name, sp.Value})
+		if sp.CriteriaType == "1" {
+			mandatory = append(mandatory, specPair{strings.TrimSpace(sp.Name), strings.TrimSpace(sp.Value)})
 		}
 	}
-	if len(mandatoryPairs) == 0 {
-		// No mandatory specs — use all provided specs
+	if len(mandatory) == 0 {
 		for _, sp := range seedSpecs {
-			mandatoryPairs = append(mandatoryPairs, specPair{sp.Name, sp.Value})
+			name := strings.TrimSpace(sp.Name)
+			value := strings.TrimSpace(sp.Value)
+			if name != "" && value != "" {
+				mandatory = append(mandatory, specPair{name, value})
+			}
 		}
 	}
-	if len(mandatoryPairs) == 0 {
+	if len(mandatory) == 0 {
 		return nil, nil
 	}
 
-	// Use the first mandatory spec as the primary filter (simplest safe approach;
-	// more pairs = more precise but slower — start with the first name+value pair)
-	primary := mandatoryPairs[0]
+	// Use the most specific (first) mandatory spec as the SQL filter.
+	// Callers should pass the hardest constraint first (e.g. teeth_count for timing belts).
+	primary := mandatory[0]
 
 	sqlspecRepo, ok := s.repo.(*sqlSpecificationRepo)
 	if !ok {
 		return nil, fmt.Errorf("FindBySpecMatch requires sqlSpecificationRepo")
 	}
 
-	const q = `
-		SELECT DISTINCT
-			a.legacyArticleId,
-			COALESCE(a.articleNumber, ''),
-			COALESCE(a.genericArticleDescription, ''),
-			COALESCE(ab.brandName, '')
-		FROM articlecriteria ac
-		JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
-		LEFT JOIN ambrand ab ON ab.brandId = a.mfrId AND ab.lang = 'en'
-		WHERE ac.criteriaDescription = ?
-		  AND ac.rawValue = ?
-		  AND ac.legacyArticleId != ?
-		ORDER BY ab.brandName
-		LIMIT ?`
-
-	rows, err := logQueryCtx(sqlspecRepo.db, ctx, "TecDocSpecifications.FindBySpecMatch", q,
-		primary.name, primary.value, seedId, limit)
+	// When seedId == 0 (no article to exclude), use a simpler query without the != filter.
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if seedId > 0 {
+		const q = `
+			SELECT DISTINCT
+				a.legacyArticleId,
+				COALESCE(a.articleNumber, ''),
+				COALESCE(a.genericArticleDescription, ''),
+				COALESCE(ab.brandName, '')
+			FROM articlecriteria ac
+			JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+			LEFT JOIN ambrand ab ON ab.brandId = a.mfrId AND ab.lang = 'en'
+			WHERE ac.criteriaDescription = ?
+			  AND ac.rawValue = ?
+			  AND ac.legacyArticleId != ?
+			ORDER BY ab.brandName
+			LIMIT ?`
+		rows, err = logQueryCtx(sqlspecRepo.db, ctx, "TecDocSpecifications.FindBySpecMatch", q,
+			primary.name, primary.value, seedId, limit)
+	} else {
+		const q = `
+			SELECT DISTINCT
+				a.legacyArticleId,
+				COALESCE(a.articleNumber, ''),
+				COALESCE(a.genericArticleDescription, ''),
+				COALESCE(ab.brandName, '')
+			FROM articlecriteria ac
+			JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+			LEFT JOIN ambrand ab ON ab.brandId = a.mfrId AND ab.lang = 'en'
+			WHERE ac.criteriaDescription = ?
+			  AND ac.rawValue = ?
+			ORDER BY ab.brandName
+			LIMIT ?`
+		rows, err = logQueryCtx(sqlspecRepo.db, ctx, "TecDocSpecifications.FindBySpecMatch", q,
+			primary.name, primary.value, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -219,11 +247,14 @@ func (s *TecDocSpecifications) FindBySpecMatch(ctx context.Context, seedId int, 
 	var out []SpecMatchResult
 	for rows.Next() {
 		var r SpecMatchResult
-		if err := rows.Scan(&r.LegacyArticleId, &r.ArticleNumber, &r.Description, &r.BrandName); err != nil {
-			log.Printf("[FindBySpecMatch] scan err: %v", err)
+		if scanErr := rows.Scan(&r.LegacyArticleId, &r.ArticleNumber, &r.Description, &r.BrandName); scanErr != nil {
+			log.Printf("[FindBySpecMatch] scan err: %v", scanErr)
 			continue
 		}
 		out = append(out, r)
+	}
+	if rowErr := rows.Err(); rowErr != nil {
+		return nil, fmt.Errorf("FindBySpecMatch rows: %w", rowErr)
 	}
 	return out, nil
 }

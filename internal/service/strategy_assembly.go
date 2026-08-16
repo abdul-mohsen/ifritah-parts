@@ -87,11 +87,15 @@ func (st *AssemblyContextStrategy) Search(ctx context.Context, req StrategyReque
 }
 
 func (st *AssemblyContextStrategy) resolveSeedId(ctx context.Context, req StrategyRequest) (int, error) {
-	if req.OEM != "" && st.search.oem != nil {
-		oemResult, err := st.search.oem.Search(req.OEM, 3)
-		if err == nil && oemResult != nil && len(oemResult.Results) > 0 {
-			return oemResult.Results[0].LegacyArticleId, nil
-		}
+	if req.OEM == "" || st.search.oem == nil {
+		return 0, nil
+	}
+	oemResult, err := st.search.oem.Search(req.OEM, 3)
+	if err != nil {
+		return 0, err
+	}
+	if oemResult != nil && len(oemResult.Results) > 0 {
+		return oemResult.Results[0].LegacyArticleId, nil
 	}
 	return 0, nil
 }
@@ -242,8 +246,8 @@ func confidence(reliability string) float64 {
 	}
 }
 
-// seen map initializer helper — package-level placeholder; real `seen` maps are local
-var _ = map[int]bool{}
+// strategyPriorityPlaceholder — see strategy.go for the real helper.
+// Removing the misleading package-level blank that was here.
 
 // ─── S8: VinAssemblyStrategy ──────────────────────────────────────────────────
 //
