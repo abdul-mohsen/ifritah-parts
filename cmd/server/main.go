@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -134,8 +135,16 @@ func main() {
 		tecdoc = service.NewTecDoc(mysql)
 		if tecdoc != nil {
 			smartSearch.SetTecDoc(tecdoc)
+			// S2: articlecrosses cross-reference (30M rows)
+			smartSearch.SetTecDocCrossRef(service.NewTecDocCrossRef(mysql))
+			// S3: enrichment pipeline services
+			smartSearch.SetTecDocSpecifications(service.NewTecDocSpecifications(mysql))
+			smartSearch.SetTecDocDocuments(service.NewTecDocDocuments(mysql))
+			smartSearch.SetTecDocSupersession(service.NewTecDocSupersession(mysql))
+			smartSearch.SetTecDocFunctional(service.NewTecDocFunctional(mysql))
+			smartSearch.SetTecDocVehicle(service.NewTecDocVehicle(mysql))
 			tecdocEnabled = true
-			log.Println("✓ TecDoc reader attached to SmartSearch (via MySQL)")
+			log.Println("✓ TecDoc reader attached to SmartSearch (OEM + crossref + specs + docs + supersession + functional + vehicle)")
 			tecdoc.LogStats()
 		}
 	}

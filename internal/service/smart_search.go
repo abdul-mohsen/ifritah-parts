@@ -16,17 +16,18 @@ import (
 
 // SmartSearch provides category-aware parts search with cross-reference expansion.
 type SmartSearch struct {
-	db           *sql.DB
-	parts        *PartsLookup
-	crossRef     *CrossRef
-	oem          *OEMLookup
-	platform     *Platform
-	onlineLookup *PartsOuqService
-	dealerLookup *DealerLookup
-	tecdoc       *TecDoc
-	dependency   *DependencyClassifier
-	offline      bool
-	queries      *store.Queries
+	db              *sql.DB
+	parts           *PartsLookup
+	crossRef        *CrossRef
+	oem             *OEMLookup
+	platform        *Platform
+	onlineLookup    *PartsOuqService
+	dealerLookup    *DealerLookup
+	tecdoc          *TecDoc
+	tecDocCrossRef  *TecDocCrossRef
+	dependency      *DependencyClassifier
+	offline         bool
+	queries         *store.Queries
 }
 
 func NewSmartSearch(db *sql.DB, parts *PartsLookup, crossRef *CrossRef, oem *OEMLookup, platform *Platform, online *PartsOuqService, offline bool) *SmartSearch {
@@ -50,6 +51,13 @@ func (s *SmartSearch) SetDealerLookup(dl *DealerLookup) {
 // SetTecDoc attaches the full TecDoc MySQL service (only available when MySQL is connected).
 func (s *SmartSearch) SetTecDoc(td *TecDoc) {
 	s.tecdoc = td
+}
+
+// SetTecDocCrossRef attaches the TecDoc articlecrosses service (S2-T1).
+// When set, searchByOEM will supplement Postgres results with articlecrosses
+// (30M rows) to increase aftermarket brand coverage.
+func (s *SmartSearch) SetTecDocCrossRef(cr *TecDocCrossRef) {
+	s.tecDocCrossRef = cr
 }
 
 // SmartResult is an enhanced part result with confidence and cross-ref data.
@@ -307,6 +315,37 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 	sortOEMReferences(refs, oemNum)
 
 	log.Printf("[SmartSearch.searchByOEM] MERGED refs=%d (elapsed=%v)", len(refs), time.Since(start))
+
+	// S2-T1: TecDoc articlecrosses (30M rows) — runs regardless of existing refs.
+	// This is the primary aftermarket brand coverage source. The Postgres
+	// oem_search_index (~1,700 rows) is orders of magnitude smaller; articlecrosses
+	// is the authoritative OEM→aftermarket cross-reference table.
+	// Runs unconditionally so that even when Postgres already has hits we still
+	// surface additional aftermarket brands from TecDoc (brand coverage 7.6% → ~50%).
+	if s.tecDocCrossRef != nil {
+		log.Printf("[SmartSearch.searchByOEM] STEP 2b: TecDoc.SearchCrossReferences")
+		tdCrossRefs, tdCrossErr := s.tecDocCrossRef.SearchCrossReferences(oemNum, limit)
+		if tdCrossErr == nil && len(tdCrossRefs) > 0 {
+			log.Printf("[SmartSearch.searchByOEM] STEP 2b HIT: %d cross-refs (elapsed=%v)", len(tdCrossRefs), time.Since(start))
+			for _, ref := range tdCrossRefs {
+				dup := false
+				for _, existing := range refs {
+					if existing.LegacyArticleId == ref.LegacyArticleId {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					refs = append(refs, ref)
+				}
+			}
+			if resp.SearchStrategy == "oem_crossref" {
+				resp.SearchStrategy = "tecdoc_crossref"
+			}
+		} else if tdCrossErr != nil {
+			log.Printf("[SmartSearch.searchByOEM] STEP 2b ERROR: %v (elapsed=%v)", tdCrossErr, time.Since(start))
+		}
+	}
 
 	if len(refs) == 0 {
 		// Strategy 0: TecDoc full database (oem_number 21.5M + oem_search_index via MySQL)
@@ -1029,6 +1068,32 @@ func (s *SmartSearch) searchByVehicle(textFilter string, linkageTargetId, vehicl
 		resp.Results = append(resp.Results, result)
 	}
 
+	// S2-T4: enrich each result with articlecrosses OEM numbers.
+	// This surfaces aftermarket alternatives for parts found via vehicle search
+	// that have no cross-reference entry in the Postgres oem_search_index.
+	// Batched: collect all legacyArticleIds, one cross-ref lookup per article.
+	if s.tecDocCrossRef != nil && len(resp.Results) > 0 {
+		for i, result := range resp.Results {
+			if result.LegacyArticleId <= 0 {
+				continue
+			}
+			// Use the article ID as a proxy OEM key — TecDoc cross-ref can resolve it
+			// to OEM numbers via the articlecrosses table.
+			oemNums, oemErr := s.oem.OEMNumbersForArticle(result.LegacyArticleId)
+			if oemErr != nil || len(oemNums) == 0 {
+				continue
+			}
+			// Take the first OEM number and look up cross-references for richer brand data.
+			if refs, refErr := s.tecDocCrossRef.SearchCrossReferences(oemNums[0], 20); refErr == nil {
+				var oemRefs []model.OEMReference
+				for _, ref := range refs {
+					oemRefs = append(oemRefs, ref)
+				}
+				resp.Results[i].OEMNumbers = oemRefs
+			}
+		}
+	}
+
 	return resp, nil
 }
 
@@ -1283,8 +1348,7 @@ func looksLikeOEMNumber(q string) bool {
 	if len(q) < 5 {
 		return false
 	}
-	// HK OEM numbers always start with a digit (e.g. 26300-35505, 97133-D3000)
-	// Aftermarket articles often start with letters (W 811/80, OC 205, C 26 013)
+	// Must start with a digit.
 	if q[0] < '0' || q[0] > '9' {
 		return false
 	}
@@ -1298,7 +1362,13 @@ func looksLikeOEMNumber(q string) bool {
 			dashes++
 		}
 	}
-	// High digit ratio with dashes = likely OEM
+	// S2-T3 (BUG-6): all-digit strings of 5+ chars starting with a digit are
+	// OEM number stems (e.g. "97133"). Route them as OEM first; if the OEM
+	// lookup misses, the cascade falls through to searchByArticle automatically.
+	if digits == len(q) && digits >= 5 {
+		return true
+	}
+	// Classic HK OEM pattern: high digit ratio with at least one dash/space.
 	return digits >= 4 && dashes >= 1
 }
 
@@ -1319,15 +1389,15 @@ func looksLikeArticleNumber(q string) bool {
 			hasDigit = true
 		}
 	}
-	// If it's purely numeric with 5+ digits, likely an article number
-	if !hasLetter && hasDigit && len(q) >= 5 {
-		return true
+	// S2-T3 (BUG-6): purely numeric strings are now handled by looksLikeOEMNumber
+	// (all-digit 5+ char rule). Do not claim them here to avoid the wrong routing.
+	if !hasLetter {
+		return false
 	}
-	// Mix of letters and digits, no spaces, no hyphens = article number
+	// Mix of letters and digits = article number pattern
 	if hasLetter && hasDigit && !strings.ContainsAny(q, "- ") {
 		return true
 	}
-	// If first char is a letter followed by digits = article number pattern
 	if hasLetter && hasDigit {
 		_, err := strconv.Atoi(q)
 		return err != nil && !strings.ContainsRune(q, '-')
