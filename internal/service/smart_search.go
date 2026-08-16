@@ -110,15 +110,20 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 			}
 			return resp, nil
 		}
-		// OEM search found nothing — try article lookup then text search
+		// OEM search found nothing — try article lookup (owned catalog).
+		// S0-T1: DO NOT fall through to searchByText for OEM queries. That path
+		// invokes SearchByKeyword (tecdoc_keyword strategy) which returns
+		// wrong-category garbage for OEM misses (root cause of BUG-1, BUG-5,
+		// BUG-9, BUG-10, BUG-11). searchByArticle is safe because it hits the
+		// owned catalog by exact article number. If both miss, return the OEM
+		// response with a warning so the caller sees the miss instead of a
+		// misleading full-text hit.
 		artResp, err := s.searchByArticle(query, linkageTargetId, vehicleCC, limit)
 		if err == nil && artResp.Total > 0 {
 			return artResp, nil
 		}
-		textResp, err := s.searchByText(query, vehicleCC, fuelType, page, limit)
-		if err == nil && textResp.Total > 0 {
-			return textResp, nil
-		}
+		resp.Warnings = append(resp.Warnings,
+			fmt.Sprintf("OEM %q not found; text-search fallback disabled to prevent wrong-category matches (S0-T1)", query))
 		return resp, nil // return original OEM response with warnings
 	case looksLikeArticleNumber(query):
 		resp, err := s.searchByArticle(query, linkageTargetId, vehicleCC, limit)
