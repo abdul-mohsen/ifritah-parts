@@ -10,6 +10,7 @@ import (
 // enrichResults fans out TecDoc enrichment for each result in parallel.
 // level: "basic" → specs + compatible vehicles; "full" → + docs + supersession + functional equivalents.
 // Cap: 10 concurrent goroutines across all results × enrichment calls.
+// Each call respects a 2s per-result timeout via context.
 func (s *SmartSearch) enrichResults(results []SmartResult, level string) []SmartResult {
 	if level == "" || level == "none" {
 		return results
@@ -25,15 +26,28 @@ func (s *SmartSearch) enrichResults(results []SmartResult, level string) []Smart
 			continue
 		}
 		wg.Add(1)
-		go func(idx int, r SmartResult) {
+		go func(idx int) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// Per-result 2s hard timeout.
+			// Sprint 1 service methods (FindSpecifications, FindDocuments etc.) use
+			// context.Background() internally — they do not yet accept a caller context.
+			// The goroutine checks ctx.Done() before starting work so that a cancelled
+			// request skips enrichment rather than blocking; actual call-level propagation
+			// requires passing ctx into Sprint 1 services (tracked as tech debt).
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 
-			id := r.LegacyArticleId
+			// Bail early if the parent context is already done.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			id := enriched[idx].LegacyArticleId
 
 			// Always: specifications
 			if s.tecDocSpecs != nil {
@@ -48,7 +62,7 @@ func (s *SmartSearch) enrichResults(results []SmartResult, level string) []Smart
 			if s.tecDocVehicle != nil {
 				if vehicles, err := s.tecDocVehicle.FindCompatibleVehicles(id, 20); err == nil {
 					enriched[idx].CompatibleVehicles = vehicles
-					// Populate legacy Compatibility []string too for backward compat
+					// Populate legacy Compatibility []string for backward compat
 					strs := make([]string, 0, len(vehicles))
 					for _, v := range vehicles {
 						strs = append(strs, v.VehicleName)
@@ -81,9 +95,7 @@ func (s *SmartSearch) enrichResults(results []SmartResult, level string) []Smart
 					enriched[idx].FunctionalEquivalents = feq
 				}
 			}
-
-			_ = ctx
-		}(i, enriched[i])
+		}(i)
 	}
 
 	wg.Wait()

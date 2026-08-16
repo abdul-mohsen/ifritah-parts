@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"parts-engine/internal/model"
@@ -16,23 +17,26 @@ import (
 
 // SmartSearch provides category-aware parts search with cross-reference expansion.
 type SmartSearch struct {
-	db              *sql.DB
-	parts           *PartsLookup
-	crossRef        *CrossRef
-	oem             *OEMLookup
-	platform        *Platform
-	onlineLookup    *PartsOuqService
-	dealerLookup    *DealerLookup
-	tecdoc          *TecDoc
-	tecDocCrossRef  *TecDocCrossRef
-	tecDocSpecs     *TecDocSpecifications
-	tecDocDocs      *TecDocDocuments
-	tecDocSuper     *TecDocSupersession
+	db               *sql.DB
+	parts            *PartsLookup
+	crossRef         *CrossRef
+	oem              *OEMLookup
+	platform         *Platform
+	onlineLookup     *PartsOuqService
+	dealerLookup     *DealerLookup
+	tecdoc           *TecDoc
+	tecDocCrossRef   *TecDocCrossRef
+	tecDocSpecs      *TecDocSpecifications
+	tecDocDocs       *TecDocDocuments
+	tecDocSuper      *TecDocSupersession
 	tecDocFunctional *TecDocFunctional
-	tecDocVehicle   *TecDocVehicle
-	dependency      *DependencyClassifier
-	offline         bool
-	queries         *store.Queries
+	tecDocVehicle    *TecDocVehicle
+	dependency       *DependencyClassifier
+	offline          bool
+	queries          *store.Queries
+	// Circuit breaker state — per-instance to avoid cross-test contamination.
+	cbFailures sync.Map // string → *atomic.Int64
+	cbDisabled sync.Map // string → time.Time
 }
 
 func NewSmartSearch(db *sql.DB, parts *PartsLookup, crossRef *CrossRef, oem *OEMLookup, platform *Platform, online *PartsOuqService, offline bool) *SmartSearch {
