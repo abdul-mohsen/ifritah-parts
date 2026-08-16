@@ -225,6 +225,7 @@ func main() {
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/recalls", recallsH.ByVIN)
 		api.GET("/search", searchH.Search)
+		api.GET("/search/modes", searchH.Modes)
 
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)

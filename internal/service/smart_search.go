@@ -25,6 +25,11 @@ type SmartSearch struct {
 	dealerLookup    *DealerLookup
 	tecdoc          *TecDoc
 	tecDocCrossRef  *TecDocCrossRef
+	tecDocSpecs     *TecDocSpecifications
+	tecDocDocs      *TecDocDocuments
+	tecDocSuper     *TecDocSupersession
+	tecDocFunctional *TecDocFunctional
+	tecDocVehicle   *TecDocVehicle
 	dependency      *DependencyClassifier
 	offline         bool
 	queries         *store.Queries
@@ -60,18 +65,40 @@ func (s *SmartSearch) SetTecDocCrossRef(cr *TecDocCrossRef) {
 	s.tecDocCrossRef = cr
 }
 
+// SetTecDocSpecifications attaches the TecDoc specifications enrichment service (S3).
+func (s *SmartSearch) SetTecDocSpecifications(sp *TecDocSpecifications) { s.tecDocSpecs = sp }
+
+// SetTecDocDocuments attaches the TecDoc documents enrichment service (S3).
+func (s *SmartSearch) SetTecDocDocuments(d *TecDocDocuments) { s.tecDocDocs = d }
+
+// SetTecDocSupersession attaches the TecDoc supersession enrichment service (S3).
+func (s *SmartSearch) SetTecDocSupersession(su *TecDocSupersession) { s.tecDocSuper = su }
+
+// SetTecDocFunctional attaches the TecDoc functional equivalents service (S3).
+func (s *SmartSearch) SetTecDocFunctional(f *TecDocFunctional) { s.tecDocFunctional = f }
+
+// SetTecDocVehicle attaches the TecDoc vehicle compatibility service (S3).
+func (s *SmartSearch) SetTecDocVehicle(v *TecDocVehicle) { s.tecDocVehicle = v }
+
 // SmartResult is an enhanced part result with confidence and cross-ref data.
 type SmartResult struct {
 	model.Part
-	Confidence              float64                  `json:"confidence"`
-	ConfidenceNote          string                   `json:"confidenceNote,omitempty"`
-	FitmentDriver           string                   `json:"fitmentDriver"`
-	OEMNumbers              []model.OEMReference     `json:"oemNumbers,omitempty"`
-	BrandResolved           string                   `json:"brand,omitempty"`
-	FitsVehicleCC           int                      `json:"fitsVehicleCC,omitempty"`
-	Substitutions           []model.SubstitutionPart `json:"substitutions,omitempty"`
-	AftermarketAlternatives []model.AftermarketPart  `json:"aftermarketAlternatives,omitempty"`
-	Compatibility           []string                 `json:"compatibility,omitempty"`
+	Confidence              float64                    `json:"confidence"`
+	ConfidenceNote          string                     `json:"confidenceNote,omitempty"`
+	FitmentDriver           string                     `json:"fitmentDriver"`
+	OEMNumbers              []model.OEMReference       `json:"oemNumbers,omitempty"`
+	BrandResolved           string                     `json:"brand,omitempty"`
+	FitsVehicleCC           int                        `json:"fitsVehicleCC,omitempty"`
+	Substitutions           []model.SubstitutionPart   `json:"substitutions,omitempty"`
+	AftermarketAlternatives []model.AftermarketPart    `json:"aftermarketAlternatives,omitempty"`
+	Compatibility           []string                   `json:"compatibility,omitempty"`
+	// S3: enrichment fields
+	Specifications      []model.Specification    `json:"specifications,omitempty"`
+	Documents           []model.Document         `json:"documents,omitempty"`
+	Supersession        *model.SupersessionChain `json:"supersession,omitempty"`
+	FunctionalEquivalents []model.OEMReference   `json:"functionalEquivalents,omitempty"`
+	CompatibleVehicles  []model.CompatibleVehicle `json:"compatibleVehicles,omitempty"`
+	SourceStrategy      string                   `json:"sourceStrategy,omitempty"`
 }
 
 // SmartSearchResponse is the full smart search response.
@@ -82,6 +109,7 @@ type SmartSearchResponse struct {
 	Total          int            `json:"total"`
 	Categories     []string       `json:"categories,omitempty"`
 	SearchStrategy string         `json:"searchStrategy"`
+	Mode           string         `json:"mode,omitempty"`
 	Warnings       []string       `json:"warnings,omitempty"`
 }
 
@@ -89,11 +117,33 @@ type SmartSearchResponse struct {
 // It detects query type (OEM number, part number, category text, VIN),
 // then applies category-aware filtering with cross-reference expansion.
 //
-// This is the outer entry point. It delegates to searchDispatch and then runs
-// a single global deduplication pass over the results so no downstream strategy
-// can leak a duplicate legacyArticleId (S0-T2, fixes BUG-2/7/8/12).
+// mode selects a specific search strategy ("exact_oem", "cross_reference",
+// "vehicle_fitment", "supersession", "cross_brand", "spec_match",
+// "assembly_context", "vin_assembly", "combined"). Empty string runs the
+// legacy cascade (backward compat).
+//
+// enrichmentLevel controls post-search enrichment:
+//   "none"  — no TecDoc enrichment (fastest)
+//   "basic" — specifications + compatible vehicles only
+//   "full"  — all: specs + docs + supersession + functional equivalents + compatible vehicles
+// Empty string defaults to "basic".
 func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, fuelType string, category string, page, limit int) (*SmartSearchResponse, error) {
-	resp, err := s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	return s.SearchWithOptions(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, "", "basic")
+}
+
+// SearchWithOptions is the full entry point used by the handler (S3/S4).
+func (s *SmartSearch) SearchWithOptions(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, mode, enrichmentLevel string) (*SmartSearchResponse, error) {
+	var resp *SmartSearchResponse
+	var err error
+
+	if mode != "" && mode != "combined" {
+		resp, err = s.searchByMode(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode)
+	} else if mode == "combined" {
+		resp, err = s.searchCombined(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	} else {
+		resp, err = s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	}
+
 	if resp != nil {
 		before := len(resp.Results)
 		resp.Results = dedupeByArticleId(resp.Results)
@@ -101,6 +151,11 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 			log.Printf("[SmartSearch.Search] dedupeByArticleId removed %d duplicate(s)", before-len(resp.Results))
 		}
 		resp.Total = len(resp.Results)
+		resp.Mode = mode
+
+		if enrichmentLevel != "none" && len(resp.Results) > 0 {
+			resp.Results = s.enrichResults(resp.Results, enrichmentLevel)
+		}
 	}
 	return resp, err
 }
