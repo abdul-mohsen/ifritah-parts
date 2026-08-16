@@ -20,36 +20,45 @@ func NewSearchHandler(search *service.SmartSearch) *SearchHandler {
 	return &SearchHandler{search: search}
 }
 
-// Search handles GET /api/search?q=&linkageTargetId=&vehicleCC=&fuelType=&category=&page=&limit=
+// Search handles GET /api/search?q=&linkageTargetId=&vehicleCC=&fuelType=&category=&page=&limit=&mode=&enrichmentLevel=
 func (h *SearchHandler) Search(c *gin.Context) {
 	start := time.Now()
 	q := c.Query("q")
 	category := c.Query("category")
 	fuelType := c.Query("fuelType")
+	mode := c.Query("mode")
+	enrichmentLevel := c.DefaultQuery("enrichmentLevel", "basic")
 
 	linkageTargetId, _ := strconv.Atoi(c.Query("linkageTargetId"))
 	vehicleCC, _ := strconv.Atoi(c.Query("vehicleCC"))
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 
-	log.Printf("[SearchHandler] >>> GET /api/search q=%q vehicle=%d cc=%d fuel=%q cat=%q page=%d limit=%d",
-		q, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	log.Printf("[SearchHandler] >>> GET /api/search q=%q vehicle=%d cc=%d fuel=%q cat=%q mode=%q enrichment=%q page=%d limit=%d",
+		q, linkageTargetId, vehicleCC, fuelType, category, mode, enrichmentLevel, page, limit)
 
 	if q == "" && linkageTargetId == 0 && category == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provide 'q' (search text), 'linkageTargetId', or 'category'"})
 		return
 	}
 
-	result, err := h.search.Search(q, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	result, err := h.search.SearchWithOptions(q, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode, enrichmentLevel)
 	if err != nil {
 		log.Printf("[SearchHandler] <<< ERROR after %v: %v", time.Since(start), err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[SearchHandler] <<< OK strategy=%q results=%d elapsed=%v",
-		result.SearchStrategy, result.Total, time.Since(start))
+	log.Printf("[SearchHandler] <<< OK strategy=%q mode=%q results=%d elapsed=%v",
+		result.SearchStrategy, result.Mode, result.Total, time.Since(start))
 	c.JSON(http.StatusOK, result)
+}
+
+// Modes handles GET /api/search/modes — returns all available search strategy descriptors.
+func (h *SearchHandler) Modes(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"modes": h.search.AvailableModes(),
+	})
 }
 
 // Categories handles GET /api/vehicle/:id/categories

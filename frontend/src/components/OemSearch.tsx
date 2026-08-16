@@ -4,6 +4,9 @@ import type { SmartSearchResponse, SmartResult, OEMSearchResponse, PartDetailVie
 import { getPartDetail, smartSearch, searchOEM } from '../api/client';
 import PartDetailModal from './PartDetailModal';
 import SupersessionChain from './SupersessionChain';
+import { SearchModeSelector, StrategyBadge, StrategiesSummaryBar } from './SearchModeSelector';
+import { SpecificationTable } from './SpecificationTable';
+import { CompatibilityChips } from './CompatibilityChips';
 import { createPartDetailViewModel, createPartDetailViewModelFromResponse } from '../utils/partDetail';
 
 const driverColors: Record<string, string> = {
@@ -119,6 +122,7 @@ export default function OemSearch() {
   const sourceQuery = searchParams.get('sourceQuery') || '';
   const hasVehicleContext = vehicleId > 0;
   const [query, setQuery] = useState(() => searchParams.get('q') || '');
+  const [searchMode, setSearchMode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<SmartSearchResponse | null>(null);
@@ -226,7 +230,11 @@ export default function OemSearch() {
         ...(fuelType ? { fuelType } : {}),
       };
       const [smartData, oemData] = await Promise.all([
-        smartSearch(trimmed, searchOptions),
+        smartSearch(trimmed, {
+          ...searchOptions,
+          mode: searchMode || undefined,
+          enrichmentLevel: 'basic',
+        }),
         isOem ? searchOEM(trimmed, 20) : Promise.resolve(null),
       ]);
       if (smartData.results == null) smartData.results = [];
@@ -276,27 +284,30 @@ export default function OemSearch() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-3 lg:flex-row lg:items-end">
-          <div className="flex-1">
-            <label className="mb-2 block text-sm font-medium text-slate-700">
-              OEM / Part Number / Description
-            </label>
-            <input
-              type="text"
-              aria-label="OEM / Part Number / Description"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. 97133-D3000, OIL-01-0001, Oil Filter"
-              className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-lg font-mono text-slate-950 outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
-            />
+        <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+            <div className="flex-1">
+              <label className="mb-2 block text-sm font-medium text-slate-700">
+                OEM / Part Number / Description
+              </label>
+              <input
+                type="text"
+                aria-label="OEM / Part Number / Description"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="e.g. 97133-D3000, OIL-01-0001, Oil Filter"
+                className="w-full rounded-2xl border border-slate-300 px-4 py-3 text-lg font-mono text-slate-950 outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={!query.trim() || loading}
+              className="rounded-2xl bg-slate-950 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {loading ? 'Searching...' : 'Search'}
+            </button>
           </div>
-          <button
-            type="submit"
-            disabled={!query.trim() || loading}
-            className="rounded-2xl bg-slate-950 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {loading ? 'Searching...' : 'Search'}
-          </button>
+          <SearchModeSelector value={searchMode} onChange={setSearchMode} />
         </form>
       </section>
 
@@ -317,19 +328,20 @@ export default function OemSearch() {
 
       {result && (
         <div>
-          <div className="mb-4 flex items-center gap-4">
-          <span className="text-sm text-slate-300">
+          <div className="mb-4 flex items-center gap-4 flex-wrap">
+            <span className="text-sm text-slate-300">
               {result.total} result{result.total !== 1 ? 's' : ''} for{' '}
-            <span className="font-mono font-semibold text-white">{result.query}</span>
+              <span className="font-mono font-semibold text-white">{result.query}</span>
             </span>
-            <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium border ${
-              result.searchStrategy === 'online_partsouq'
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-            }`}>
-              {result.searchStrategy === 'online_partsouq' ? 'Online Lookup' : `strategy: ${result.searchStrategy}`}
-            </span>
+            <StrategyBadge strategy={result.mode || result.searchStrategy} />
           </div>
+
+          {/* Strategies summary bar for combined mode */}
+          {result.mode === 'combined' && result.results.length > 0 && (
+            <StrategiesSummaryBar
+              strategies={result.results.map(r => r.sourceStrategy || '').filter(Boolean)}
+            />
+          )}
 
           {result.warnings && result.warnings.length > 0 && (
             <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
@@ -530,6 +542,7 @@ function ResultCard({
           <div className="flex items-center gap-2 flex-wrap">
             <FitmentBadge driver={r.fitmentDriver} />
             <ConfidenceBadge value={r.confidence} />
+            {r.sourceStrategy && <StrategyBadge strategy={r.sourceStrategy} />}
             {r.fitsVehicleCC && r.fitsVehicleCC > 0 && (
               <span className="text-xs text-gray-400">{r.fitsVehicleCC}cc</span>
             )}
@@ -618,8 +631,22 @@ function ResultCard({
         </div>
       )}
 
-      {/* Vehicle compatibility */}
-      {r.compatibility && r.compatibility.length > 0 && (
+      {/* Vehicle compatibility chips (S3 enrichment) */}
+      {r.compatibleVehicles && r.compatibleVehicles.length > 0 && (
+        <div className="border-t border-gray-100 px-4 py-3">
+          <CompatibilityChips vehicles={r.compatibleVehicles} maxVisible={4} />
+        </div>
+      )}
+
+      {/* Specifications table (S3 enrichment) */}
+      {r.specifications && r.specifications.length > 0 && (
+        <div className="border-t border-gray-100 px-4 py-3">
+          <SpecificationTable specs={r.specifications} />
+        </div>
+      )}
+
+      {/* Vehicle compatibility (legacy string list) */}
+      {r.compatibility && r.compatibility.length > 0 && (!r.compatibleVehicles || r.compatibleVehicles.length === 0) && (
         <div className="border-t border-gray-100 px-4 py-3">
           <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
             Vehicle Compatibility
@@ -639,7 +666,10 @@ function ResultCard({
 
       {expanded && r.legacyArticleId > 0 && (
         <div className="border-t border-gray-100 px-4 py-3 bg-gray-50">
-          <SupersessionChain legacyArticleId={r.legacyArticleId} />
+          <SupersessionChain
+            legacyArticleId={r.supersession ? undefined : r.legacyArticleId}
+            chain={r.supersession}
+          />
         </div>
       )}
     </div>

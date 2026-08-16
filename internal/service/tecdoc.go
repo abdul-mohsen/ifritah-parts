@@ -540,3 +540,63 @@ func formatCount(n int64) string {
 	}
 	return fmt.Sprintf("%d", n)
 }
+
+// LinkageTargetToSpecs reads linkagetargets columns (capacityCC, cylinders,
+// fuelType, engineType, horsePowerFrom) and maps them to model.Specification
+// slices so they can be fed into AssemblyContextStrategy / VinAssemblyStrategy
+// as if they were article specifications. (S8-T1)
+func (t *TecDoc) LinkageTargetToSpecs(ctx context.Context, linkageTargetId int) ([]model.Specification, error) {
+	if t.db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+	const q = `
+		SELECT
+			COALESCE(capacityCC, 0),
+			COALESCE(cylinders, 0),
+			COALESCE(fuelType, ''),
+			COALESCE(engineType, ''),
+			COALESCE(horsePowerFrom, 0)
+		FROM linkagetargets
+		WHERE linkageTargetId = ?
+		LIMIT 1`
+
+	row := t.db.QueryRowContext(ctx, q, linkageTargetId)
+	var capacityCC, cylinders, horsePower int
+	var fuelType, engineType string
+	if err := row.Scan(&capacityCC, &cylinders, &fuelType, &engineType, &horsePower); err != nil {
+		return nil, fmt.Errorf("linkagetargets lookup: %w", err)
+	}
+
+	var specs []model.Specification
+	if capacityCC > 0 {
+		specs = append(specs, model.Specification{
+			Name:   "displacement",
+			Value:  fmt.Sprintf("%d", capacityCC),
+			Unit:   "cc",
+			Source: "tecdoc:linkagetargets",
+		})
+	}
+	if cylinders > 0 {
+		specs = append(specs, model.Specification{
+			Name:   "cylinders",
+			Value:  fmt.Sprintf("%d", cylinders),
+			Source: "tecdoc:linkagetargets",
+		})
+	}
+	if fuelType != "" {
+		specs = append(specs, model.Specification{
+			Name:   "fuel_type",
+			Value:  fuelType,
+			Source: "tecdoc:linkagetargets",
+		})
+	}
+	if horsePower > 0 {
+		specs = append(specs, model.Specification{
+			Name:   "horse_power",
+			Value:  fmt.Sprintf("%d", horsePower),
+			Unit:   "hp",
+			Source: "tecdoc:linkagetargets",
+		})
+	}
+	return specs, nil
+}

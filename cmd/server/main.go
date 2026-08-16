@@ -118,7 +118,12 @@ func main() {
 	if tecdocDB != nil {
 		smartSearch.SetTecDoc(service.NewTecDoc(tecdocDB))
 		smartSearch.SetTecDocCrossRef(service.NewTecDocCrossRef(tecdocDB))
-		log.Println("✓ TecDoc strategies enabled (SearchByOEM + articlecrosses)")
+		smartSearch.SetTecDocSpecifications(service.NewTecDocSpecifications(tecdocDB))
+		smartSearch.SetTecDocDocuments(service.NewTecDocDocuments(tecdocDB))
+		smartSearch.SetTecDocSupersession(service.NewTecDocSupersession(tecdocDB))
+		smartSearch.SetTecDocFunctional(service.NewTecDocFunctional(tecdocDB))
+		smartSearch.SetTecDocVehicle(service.NewTecDocVehicle(tecdocDB))
+		log.Println("✓ TecDoc strategies enabled (OEM + articlecrosses + specs + docs + supersession + functional + vehicle)")
 	}
 
 	dealerLookup := service.NewDealerLookup(partsCache)
@@ -184,6 +189,7 @@ func main() {
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/recalls", recallsH.ByVIN)
 		api.GET("/search", searchH.Search)
+		api.GET("/search/modes", searchH.Modes)
 
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)
