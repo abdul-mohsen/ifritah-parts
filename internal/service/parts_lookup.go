@@ -83,6 +83,22 @@ func (s *PartsLookup) FindByArticleNumber(articleNumber string, linkageTargetId,
 		return nil, fmt.Errorf("find article number: %w", err)
 	}
 
+	// S2-T2 (BUG-4): if exact match finds nothing, try the normalized form
+	// (dashes/spaces stripped). hk_parts_cache may store article_number without
+	// punctuation (e.g. "2630035505") even when the OEM is queried as "26300-35505".
+	if len(rows) == 0 {
+		normalized := NormalizeOEM(articleNumber)
+		if normalized != strings.ToLower(articleNumber) {
+			rows2, err2 := s.queries.SearchByArticleNumber(context.Background(), store.SearchByArticleNumberParams{
+				Upper: strings.ToUpper(normalized),
+				Limit: int32(limit),
+			})
+			if err2 == nil {
+				rows = rows2
+			}
+		}
+	}
+
 	parts := make([]model.Part, 0, len(rows))
 	for _, row := range rows {
 		if linkageTargetId > 0 {

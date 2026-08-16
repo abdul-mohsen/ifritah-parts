@@ -1,12 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
@@ -90,10 +92,34 @@ func main() {
 	replacementAdvisor := service.NewReplacementAdvisor(crossRef, partsLookup, alternatives)
 	commonsMediaStore := service.NewCommonsMediaStore(pg)
 
+	// TecDoc MySQL — optional. Only wired when TECDOC_DSN is set.
+	var tecdocDB *sql.DB
+	if cfg.TecDocDSN != "" {
+		var err error
+		tecdocDB, err = sql.Open("mysql", cfg.TecDocDSN)
+		if err != nil {
+			log.Printf("⚠ TecDoc MySQL open error: %v (running without TecDoc)", err)
+			tecdocDB = nil
+		} else if pingErr := tecdocDB.Ping(); pingErr != nil {
+			log.Printf("⚠ TecDoc MySQL unreachable: %v (running without TecDoc)", pingErr)
+			tecdocDB.Close()
+			tecdocDB = nil
+		} else {
+			defer tecdocDB.Close()
+			log.Println("✓ TecDoc MySQL connected")
+		}
+	}
+
 	var partsCache *service.PartsCache
 	var onlineLookup *service.PartsOuqService
 	onlineLookup = service.NewPartsOuqService(partsCache)
 	smartSearch := service.NewSmartSearch(pg, partsLookup, crossRef, oemLookup, platform, onlineLookup, false)
+
+	if tecdocDB != nil {
+		smartSearch.SetTecDoc(service.NewTecDoc(tecdocDB))
+		smartSearch.SetTecDocCrossRef(service.NewTecDocCrossRef(tecdocDB))
+		log.Println("✓ TecDoc strategies enabled (SearchByOEM + articlecrosses)")
+	}
 
 	dealerLookup := service.NewDealerLookup(partsCache)
 	smartSearch.SetDealerLookup(dealerLookup)

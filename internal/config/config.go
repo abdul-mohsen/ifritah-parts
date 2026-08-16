@@ -27,6 +27,11 @@ type Config struct {
 	// InternalAPIKey guards /api/internal/* endpoints.
 	// Set via INTERNAL_API_KEY env var. When empty the routes are disabled.
 	InternalAPIKey string
+
+	// TecDocDSN is the MySQL DSN for the TecDoc catalog database.
+	// Example: "user:pass@tcp(host:3306)/tecdoc?parseTime=true"
+	// When empty, all TecDoc MySQL features are disabled gracefully.
+	TecDocDSN string
 }
 
 func Load() *Config {
@@ -47,6 +52,7 @@ func Load() *Config {
 		NHTSABaseURL:     envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
 		NHTSARecallsURL:  envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
 		InternalAPIKey:   os.Getenv("INTERNAL_API_KEY"),
+		TecDocDSN:        os.Getenv("TECDOC_DSN"),
 	}
 }
 
