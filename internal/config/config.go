@@ -23,6 +23,10 @@ type Config struct {
 	ElasticURL      string
 	NHTSABaseURL    string
 	NHTSARecallsURL string
+
+	// InternalAPIKey guards /api/internal/* endpoints.
+	// Set via INTERNAL_API_KEY env var. When empty the routes are disabled.
+	InternalAPIKey string
 }
 
 func Load() *Config {
@@ -42,6 +46,7 @@ func Load() *Config {
 		ElasticURL:       envOr("ELASTIC_URL", "http://localhost:9200"),
 		NHTSABaseURL:     envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
 		NHTSARecallsURL:  envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
+		InternalAPIKey:   os.Getenv("INTERNAL_API_KEY"),
 	}
 }
 
