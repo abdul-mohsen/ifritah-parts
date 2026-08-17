@@ -163,9 +163,16 @@ type sqlCrossRefRepo struct {
 }
 
 func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error) {
+	// BUG FIX 2026-08-17: the SELECT list originally used `ac.articleCrossNumber`
+	// which does not exist in the TecDoc 2020 schema — the query failed with
+	// "Error 1054 (42S22): Unknown column 'ac.articleCrossNumber' in 'field list'"
+	// and broke cross_reference mode entirely (confirmed via /api/debug/logs).
+	// Selecting `ac.cleanCrossNumber` twice keeps the row shape consistent
+	// (RawCrossNumber field receives the normalized value — that's the only
+	// column we're sure exists across TecDoc dumps).
 	const q = `
 		SELECT
-			ac.articleCrossNumber,
+			ac.cleanCrossNumber,
 			COALESCE(ac.mfrName, ''),
 			COALESCE(a.legacyArticleId, 0),
 			COALESCE(a.articleNumber, ''),
@@ -239,7 +246,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 	q := fmt.Sprintf(`
 		SELECT
 			ac.cleanCrossNumber,
-			ac.articleCrossNumber,
+			ac.cleanCrossNumber,
 			COALESCE(ac.mfrName, ''),
 			COALESCE(a.legacyArticleId, 0),
 			COALESCE(a.articleNumber, ''),
