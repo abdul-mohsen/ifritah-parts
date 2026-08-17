@@ -137,15 +137,43 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 
 // SearchWithOptions is the full entry point used by the handler (S3/S4).
 func (s *SmartSearch) SearchWithOptions(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, mode, enrichmentLevel string) (*SmartSearchResponse, error) {
+	return s.SearchWithProgress(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode, enrichmentLevel, nil)
+}
+
+// SearchWithProgress is identical to SearchWithOptions but accepts an optional
+// ProgressCh. When non-nil, the search writes ProgressEvent values to the channel
+// as each major step starts and finishes. The SSE handler consumes these events
+// and forwards them to the browser. Pass nil to get the original behaviour.
+func (s *SmartSearch) SearchWithProgress(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, mode, enrichmentLevel string, progressCh chan<- ProgressEvent) (*SmartSearchResponse, error) {
+	start := s.now()
 	var resp *SmartSearchResponse
 	var err error
 
 	if mode != "" && mode != "combined" {
+		done := progressStep(progressCh, start, mode, labelForMode(mode))
 		resp, err = s.searchByMode(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode)
+		resultCount := 0
+		if resp != nil {
+			resultCount = resp.Total
+		}
+		done(resultCount)
 	} else if mode == "combined" {
+		done := progressStep(progressCh, start, "combined", "Running all strategies in parallel…")
 		resp, err = s.searchCombined(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		resultCount := 0
+		if resp != nil {
+			resultCount = resp.Total
+		}
+		done(resultCount)
 	} else {
+		// Legacy cascade — emit a single progress step for the whole dispatch.
+		done := progressStep(progressCh, start, "search", "Searching…")
 		resp, err = s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		resultCount := 0
+		if resp != nil {
+			resultCount = resp.Total
+		}
+		done(resultCount)
 	}
 
 	if resp != nil {
@@ -158,10 +186,44 @@ func (s *SmartSearch) SearchWithOptions(query string, linkageTargetId, vehicleCC
 		resp.Mode = mode
 
 		if enrichmentLevel != "none" && len(resp.Results) > 0 {
+			done := progressStep(progressCh, start, "enrichment", fmt.Sprintf("Enriching %d results…", len(resp.Results)))
 			resp.Results = s.enrichResults(resp.Results, enrichmentLevel)
+			done(len(resp.Results))
 		}
 	}
+
+	// Signal completion so the SSE loop knows to close the stream.
+	send(progressCh, ProgressEvent{
+		Type:      "done",
+		Step:      "done",
+		Label:     "Search complete",
+		ElapsedMs: time.Since(start).Milliseconds(),
+	})
+
 	return resp, err
+}
+
+// now returns the current time. Extracted so tests can override it if needed.
+func (s *SmartSearch) now() time.Time { return time.Now() }
+
+// labelForMode maps a strategy key to a human-readable progress label.
+func labelForMode(mode string) string {
+	labels := map[string]string{
+		"exact_oem":        "Checking OEM index…",
+		"cross_reference":  "Querying TecDoc articlecrosses (30M rows)…",
+		"vehicle_fitment":  "Looking up vehicle-part linkages…",
+		"supersession":     "Walking supersession chain…",
+		"cross_brand":      "Checking cross-brand platform equivalents…",
+		"owned_catalog":    "Searching owned catalog…",
+		"keyword_gated":    "Running keyword search…",
+		"spec_match":       "Matching by physical specifications…",
+		"assembly_context": "Deriving sub-parts from assembly specs…",
+		"vin_assembly":     "Matching by vehicle engine & chassis specs…",
+	}
+	if l, ok := labels[mode]; ok {
+		return l
+	}
+	return "Searching (" + mode + ")…"
 }
 
 // searchDispatch holds the actual strategy-selection cascade. It is the pre-S0-T2
