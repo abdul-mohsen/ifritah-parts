@@ -9,6 +9,7 @@ import type {
   AlternativesResponse,
   PlatformResponse,
   PartDetailResponse,
+  SearchMode,
 } from '../types';
 
 const BASE = '/api';
@@ -79,7 +80,16 @@ export async function getRecalls(
 
 export async function smartSearch(
   q: string,
-  opts: { linkageTargetId?: number; vehicleCC?: number; fuelType?: string; category?: string; page?: number; limit?: number } = {}
+  opts: {
+    linkageTargetId?: number;
+    vehicleCC?: number;
+    fuelType?: string;
+    category?: string;
+    page?: number;
+    limit?: number;
+    mode?: string;
+    enrichmentLevel?: string;
+  } = {}
 ): Promise<SmartSearchResponse> {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
@@ -89,7 +99,13 @@ export async function smartSearch(
   if (opts.category) params.set('category', opts.category);
   if (opts.page) params.set('page', String(opts.page));
   if (opts.limit) params.set('limit', String(opts.limit));
+  if (opts.mode) params.set('mode', opts.mode);
+  if (opts.enrichmentLevel) params.set('enrichmentLevel', opts.enrichmentLevel);
   return request(`/search?${params}`);
+}
+
+export async function getSearchModes(): Promise<{ modes: SearchMode[] }> {
+  return request('/search/modes');
 }
 
 export async function getCategoryTree(

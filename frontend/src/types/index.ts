@@ -189,6 +189,54 @@ export interface AftermarketPart {
   brand: string;
 }
 
+// S3: Enrichment types
+export interface Specification {
+  name: string;
+  value: string;
+  unit?: string;
+  criteriaType?: string;
+  source?: string;
+  warning?: string;
+}
+
+export interface Document {
+  legacyArticleId: number;
+  url: string;
+  fileName?: string;
+  docType?: string;
+  language?: string;
+  licensedSource?: string;
+}
+
+export interface SupersessionChain {
+  current: SupersessionLink;
+  replacedBy?: SupersessionLink[];
+  replaces?: SupersessionLink[];
+  depth: number;
+  truncated?: boolean;
+}
+
+export interface CompatibleVehicle {
+  legacyArticleId: number;
+  linkageTargetId: number;
+  vehicleName: string;
+  make?: string;
+  model?: string;
+  yearFrom?: number;
+  yearTo?: number;
+  fuelType?: string;
+  capacityCC?: number;
+  horsePower?: number;
+  fitmentDriver?: string;
+}
+
+// S4: Search mode descriptor
+export interface SearchMode {
+  key: string;
+  name: string;
+  description: string;
+}
+
 export interface SmartResult {
   legacyArticleId: number;
   articleNumber: string;
@@ -205,6 +253,13 @@ export interface SmartResult {
   substitutions?: SubstitutionPart[];
   aftermarketAlternatives?: AftermarketPart[];
   compatibility?: string[];
+  // S3 enrichment
+  specifications?: Specification[];
+  documents?: Document[];
+  supersession?: SupersessionChain;
+  functionalEquivalents?: OEMReference[];
+  compatibleVehicles?: CompatibleVehicle[];
+  sourceStrategy?: string;
 }
 
 export interface SmartSearchResponse {
@@ -214,6 +269,7 @@ export interface SmartSearchResponse {
   total: number;
   categories?: string[];
   searchStrategy: string;
+  mode?: string;
   warnings?: string[];
 }
 

@@ -46,6 +46,10 @@ type Config struct {
 	ElasticURL      string
 	NHTSABaseURL    string
 	NHTSARecallsURL string
+
+	// InternalAPIKey guards /api/internal/* endpoints.
+	// Set via INTERNAL_API_KEY env var. When empty the routes are disabled.
+	InternalAPIKey string
 }
 
 func Load() *Config {
@@ -58,24 +62,6 @@ func Load() *Config {
 		PostgresPassword: os.Getenv("PGPASSWORD"),
 		PostgresDB:       envOr("PGDATABASE", "parts_engine"),
 		PostgresSSLMode:  envOr("PGSSLMODE", "disable"),
-
-		// MySQL — the primary source of truth for parts. Every OEM / text /
-		// vehicle search must consult MySQL FIRST (the 21.5M-row oem_number
-		// table + articlesvehicletrees + articlecrosses + articlecriteria).
-		// The local Postgres + SQLite tables are a cache / enrichment layer,
-		// not the authority.
-		//
-		// Canonical env-var names (documented in C:\ssda\chatGPT\parts\test_queries.go):
-		//   HOST      → "host:port" or bare host
-		//   DBPORT    → 3306 default (ignored if HOST already has :port)
-		//   DBUSER    → root default
-		//   PASSWORD  → required in production, empty in dev
-		//   DBNAME    → dev_ifritah default
-		// Aliases (accepted but secondary): MYSQL_HOST, MYSQL_PORT, MYSQL_USER,
-		//   MYSQL_PASSWORD, MYSQL_DATABASE.
-		//
-		// Empty HOST + no MYSQL_HOST + no ALLOW_NO_MYSQL=1 → server exits at
-		// startup. See internal/db/mysql.go for the fail-hard contract.
 		MySQLHost:     firstNonEmpty(stripPort(os.Getenv("HOST")), os.Getenv("MYSQL_HOST")),
 		MySQLPort:     firstNonEmpty(os.Getenv("DBPORT"), portFrom(os.Getenv("HOST")), os.Getenv("MYSQL_PORT"), "3306"),
 		MySQLUser:     firstNonEmpty(os.Getenv("DBUSER"), os.Getenv("MYSQL_USER"), "root"),
@@ -89,6 +75,7 @@ func Load() *Config {
 		ElasticURL:      envOr("ELASTIC_URL", "http://localhost:9200"),
 		NHTSABaseURL:    envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
 		NHTSARecallsURL: envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
+		InternalAPIKey:  os.Getenv("INTERNAL_API_KEY"),
 	}
 }
 

@@ -109,7 +109,7 @@ test.describe('Story 1 regression safety net', () => {
 
     await expect(page.getByTestId('vin-part-search')).toBeVisible();
     await page.getByLabel('Part name for confirmed vehicle').fill('cabin air filter');
-    await page.getByRole('button', { name: 'Search this vehicle' }).click();
+    await page.getByRole('button', { name: 'Search by vehicle spec' }).click();
 
     await expect(page).toHaveURL(/\/oem\?.*vehicleId=10001/);
     await expect(page.getByTestId('search-vehicle-context')).toContainText('HYUNDAI TUCSON');

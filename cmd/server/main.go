@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -16,6 +18,7 @@ import (
 	"parts-engine/internal/db"
 	"parts-engine/internal/enrich"
 	"parts-engine/internal/handler"
+	"parts-engine/internal/middleware"
 	"parts-engine/internal/nhtsa"
 	"parts-engine/internal/service"
 )
@@ -134,8 +137,16 @@ func main() {
 		tecdoc = service.NewTecDoc(mysql)
 		if tecdoc != nil {
 			smartSearch.SetTecDoc(tecdoc)
+			// S2: articlecrosses cross-reference (30M rows)
+			smartSearch.SetTecDocCrossRef(service.NewTecDocCrossRef(mysql))
+			// S3: enrichment pipeline services
+			smartSearch.SetTecDocSpecifications(service.NewTecDocSpecifications(mysql))
+			smartSearch.SetTecDocDocuments(service.NewTecDocDocuments(mysql))
+			smartSearch.SetTecDocSupersession(service.NewTecDocSupersession(mysql))
+			smartSearch.SetTecDocFunctional(service.NewTecDocFunctional(mysql))
+			smartSearch.SetTecDocVehicle(service.NewTecDocVehicle(mysql))
 			tecdocEnabled = true
-			log.Println("✓ TecDoc reader attached to SmartSearch (via MySQL)")
+			log.Println("✓ TecDoc reader attached to SmartSearch (OEM + crossref + specs + docs + supersession + functional + vehicle)")
 			tecdoc.LogStats()
 		}
 	}
@@ -184,6 +195,26 @@ func main() {
 		AllowCredentials: corsAllowCredentials,
 	}))
 
+	// internalAuth guards /api/internal/* routes with a static bearer token.
+	// Set INTERNAL_API_KEY in the environment. When the key is empty the
+	// middleware disables all internal routes entirely (503).
+	//
+	// Token comparison uses crypto/subtle.ConstantTimeCompare so per-byte
+	// timing does not leak the secret to an attacker measuring latency.
+	expectedAuth := []byte("Bearer " + cfg.InternalAPIKey)
+	internalAuth := func(c *gin.Context) {
+		if cfg.InternalAPIKey == "" {
+			c.AbortWithStatusJSON(503, gin.H{"error": "internal API not configured"})
+			return
+		}
+		provided := []byte(c.GetHeader("Authorization"))
+		if subtle.ConstantTimeCompare(provided, expectedAuth) != 1 {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Next()
+	}
+
 	api := r.Group("/api")
 	{
 		api.POST("/vin/decode", vinH.Decode)
@@ -199,20 +230,24 @@ func main() {
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/recalls", recallsH.ByVIN)
-		api.GET("/search", searchH.Search)
+		// Rate-limited: 100 requests/min sustained, burst 20 per client IP.
+		// Applied only to /api/search (not /search/modes which is cheap).
+		searchRL := middleware.NewRateLimiter(100, 20)
+		api.GET("/search", searchRL.Middleware(), searchH.Search)
+		api.GET("/search/modes", searchH.Modes)
 
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)
 		api.GET("/catalog/groups", catalogH.Groups)
 		api.GET("/catalog/parts", catalogH.GroupParts)
 
-		internal := api.Group("/internal/worker")
+		internal := api.Group("/internal/worker", internalAuth)
 		{
 			internal.POST("/replacements", workerH.SubmitReplacement)
 			internal.GET("/replacements", workerH.ListReplacements)
 			internal.POST("/replacements/:id/review", workerH.ReviewReplacement)
 		}
-		media := api.Group("/internal/media/commons")
+		media := api.Group("/internal/media/commons", internalAuth)
 		{
 			media.POST("", commonsMediaH.Submit)
 			media.GET("", commonsMediaH.List)

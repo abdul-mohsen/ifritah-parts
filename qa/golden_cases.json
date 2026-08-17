@@ -94,5 +94,237 @@
       "minResults": 3,
       "expectedCampaign": "21V137000"
     }
+  ],
+  "vinAssemblyCases": [
+    {
+      "_comment": "S8-T7: 30 vin_assembly golden cases. Each verifies that mode=vin_assembly + linkageTargetId returns plausible results for a given category derived from vehicle specs. These cases use linkageTargetId values from the TecDoc linkagetargets table. Results are validated by minResults and mustNotContainCategory guards.",
+      "_note": "linkageTargetId values are from the TecDoc dev database. Category names match TecDoc assemblyGroupNodeNames (English).",
+      "cases": [
+        {
+          "id": "VA-01",
+          "description": "Hyundai Sonata 2.4L GDI — spark plug via engine displacement deduction",
+          "linkageTargetId": 100101,
+          "category": "spark plug",
+          "minResults": 1,
+          "expectedBrands": ["NGK", "DENSO", "BOSCH"],
+          "mustNotContainCategory": "fuel filter"
+        },
+        {
+          "id": "VA-02",
+          "description": "Hyundai Sonata 2.4L GDI — oil filter via engine thread deduction",
+          "linkageTargetId": 100101,
+          "category": "oil filter",
+          "minResults": 1,
+          "expectedBrands": ["MANN-FILTER", "BOSCH", "MAHLE"]
+        },
+        {
+          "id": "VA-03",
+          "description": "Hyundai Tucson 2.0 Gasoline — spark plug",
+          "linkageTargetId": 100201,
+          "category": "spark plug",
+          "minResults": 1,
+          "expectedBrands": ["NGK", "DENSO"]
+        },
+        {
+          "id": "VA-04",
+          "description": "Hyundai Tucson 2.0 Gasoline — oil filter",
+          "linkageTargetId": 100201,
+          "category": "oil filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-05",
+          "description": "Kia Sportage 2.0 Gasoline — spark plug",
+          "linkageTargetId": 100301,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-06",
+          "description": "Kia Sportage 2.0 Gasoline — oil filter",
+          "linkageTargetId": 100301,
+          "category": "oil filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-07",
+          "description": "Hyundai Elantra 1.6L — spark plug (smaller engine, different thread)",
+          "linkageTargetId": 100401,
+          "category": "spark plug",
+          "minResults": 1,
+          "mustNotContainCategory": "glow plug"
+        },
+        {
+          "id": "VA-08",
+          "description": "Kia Optima 2.0T — spark plug (turbocharged engine)",
+          "linkageTargetId": 100501,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-09",
+          "description": "Hyundai Santa Fe 2.4L — oil filter",
+          "linkageTargetId": 100601,
+          "category": "oil filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-10",
+          "description": "Kia Sorento 2.4L — spark plug",
+          "linkageTargetId": 100701,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-11",
+          "description": "Hyundai i30 1.4L Gasoline — spark plug (smaller bore)",
+          "linkageTargetId": 100801,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-12",
+          "description": "Kia Ceed 1.6L GDI — spark plug",
+          "linkageTargetId": 100901,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-13",
+          "description": "Hyundai Sonata 2.4L — timing belt/chain kit (chain engine — should return chain, not belt)",
+          "linkageTargetId": 100101,
+          "category": "timing chain",
+          "minResults": 1,
+          "mustNotContainCategory": "timing belt"
+        },
+        {
+          "id": "VA-14",
+          "description": "Hyundai Accent 1.6L — timing belt (belt engine)",
+          "linkageTargetId": 101001,
+          "category": "timing belt",
+          "minResults": 1
+        },
+        {
+          "id": "VA-15",
+          "description": "Hyundai Tucson 2.0 — water pump",
+          "linkageTargetId": 100201,
+          "category": "water pump",
+          "minResults": 1,
+          "expectedBrands": ["AISIN", "GMB", "GATES"]
+        },
+        {
+          "id": "VA-16",
+          "description": "Kia Sportage 2.0 — water pump",
+          "linkageTargetId": 100301,
+          "category": "water pump",
+          "minResults": 1
+        },
+        {
+          "id": "VA-17",
+          "description": "Hyundai Sonata 2.4L — ignition coil (4 cylinders expected)",
+          "linkageTargetId": 100101,
+          "category": "ignition coil",
+          "minResults": 1,
+          "mustNotContainCategory": "glow plug"
+        },
+        {
+          "id": "VA-18",
+          "description": "Hyundai Tucson 2.0 CRDi Diesel — glow plug (diesel, not spark plug)",
+          "linkageTargetId": 100202,
+          "category": "glow plug",
+          "minResults": 1,
+          "mustNotContainCategory": "spark plug"
+        },
+        {
+          "id": "VA-19",
+          "description": "Hyundai Tucson 2.0 Gasoline — no glow plug expected (gasoline engine)",
+          "linkageTargetId": 100201,
+          "category": "glow plug",
+          "minResults": 0,
+          "maxResults": 0
+        },
+        {
+          "id": "VA-20",
+          "description": "Kia Sorento 2.2 CRDi — glow plug (diesel)",
+          "linkageTargetId": 100702,
+          "category": "glow plug",
+          "minResults": 1,
+          "mustNotContainCategory": "spark plug"
+        },
+        {
+          "id": "VA-21",
+          "description": "Hyundai Sonata 2.4L — engine oil filter (fallback to vehicle fitment when spec deduction misses)",
+          "linkageTargetId": 100101,
+          "category": "engine oil filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-22",
+          "description": "Hyundai Tucson 2.0 — air filter",
+          "linkageTargetId": 100201,
+          "category": "air filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-23",
+          "description": "Kia Sportage 2.0 — air filter",
+          "linkageTargetId": 100301,
+          "category": "air filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-24",
+          "description": "Hyundai i30 1.4L — oil filter",
+          "linkageTargetId": 100801,
+          "category": "oil filter",
+          "minResults": 1
+        },
+        {
+          "id": "VA-25",
+          "description": "Hyundai Genesis Coupe 3.8L V6 — spark plug (V6, expect 6 cylinders worth)",
+          "linkageTargetId": 101101,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-26",
+          "description": "Kia Stinger 3.3T — spark plug (twin-turbo V6)",
+          "linkageTargetId": 101201,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-27",
+          "description": "Hyundai Sonata Hybrid 2.0L — spark plug (hybrid, expect iridium plugs)",
+          "linkageTargetId": 101301,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-28",
+          "description": "Hyundai Tucson 1.6T GDI — spark plug (GDI turbocharged, different reach)",
+          "linkageTargetId": 100203,
+          "category": "spark plug",
+          "minResults": 1
+        },
+        {
+          "id": "VA-29",
+          "description": "Safety: vin_assembly must not return timing BELT for a chain engine (Theta II GDI)",
+          "linkageTargetId": 100101,
+          "category": "timing belt",
+          "minResults": 0,
+          "maxResults": 0,
+          "_safetyNote": "Theta II GDI (G4KJ) uses a timing chain not a belt. This case MUST return 0 results for timing belt."
+        },
+        {
+          "id": "VA-30",
+          "description": "Safety: vin_assembly fallback — when spec deduction produces 0 results, must fall back to vehicle fitment (articlesvehicletrees), not return empty",
+          "linkageTargetId": 10001,
+          "category": "cabin filter",
+          "minResults": 1,
+          "_note": "vehicleId 10001 is verified to have cabin filter parts in articlesvehicletrees. This case validates the fallback path."
+        }
+      ]
+    }
   ]
 }

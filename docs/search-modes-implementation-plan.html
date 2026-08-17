@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Multi-Strategy Parts Search — Implementation Plan</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #21262d;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --text-bright: #f0f6fc;
+  --blue: #58a6ff;
+  --green: #56d364;
+  --yellow: #d29922;
+  --red: #f85149;
+  --purple: #bc8cff;
+  --orange: #db6d28;
+  --accent: #1f6feb;
+  --code-bg: #010409;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  background: var(--bg); color: var(--text); line-height: 1.6; font-size: 14px;
+  padding: 24px;
+}
+h1 { color: var(--text-bright); font-size: 28px; margin-bottom: 8px; }
+h2 { color: var(--text-bright); font-size: 22px; margin-top: 32px; margin-bottom: 12px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+h3 { color: var(--blue); font-size: 18px; margin: 16px 0 8px; }
+h4 { color: var(--text-bright); font-size: 15px; margin: 12px 0 6px; }
+p { margin-bottom: 8px; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  background: var(--code-bg); color: #a5f4a5; padding: 2px 6px; border-radius: 3px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 13px;
+}
+pre { background: var(--code-bg); color: var(--text); padding: 12px; border-radius: 6px; overflow-x: auto; border: 1px solid var(--border); margin: 8px 0; }
+pre code { background: none; padding: 0; color: inherit; }
+.container { max-width: 1400px; margin: 0 auto; }
+.header {
+  background: linear-gradient(135deg, #1f6feb 0%, #8957e5 100%);
+  padding: 32px; border-radius: 12px; margin-bottom: 24px;
+}
+.header h1 { color: white; }
+.header p { color: rgba(255,255,255,0.9); margin-bottom: 0; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 12px; margin-bottom: 24px; }
+.summary-card { background: var(--panel); border: 1px solid var(--border); padding: 16px; border-radius: 8px; }
+.summary-card .label { color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.summary-card .value { color: var(--text-bright); font-size: 26px; font-weight: 700; margin: 4px 0; }
+.summary-card .sub { color: var(--text-dim); font-size: 12px; }
+.summary-card.blue { border-left: 3px solid var(--blue); }
+.summary-card.green { border-left: 3px solid var(--green); }
+.summary-card.orange { border-left: 3px solid var(--orange); }
+.summary-card.purple { border-left: 3px solid var(--purple); }
+
+.mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap: 12px; margin: 16px 0; }
+.mode-card { background: var(--panel); border: 1px solid var(--border); padding: 16px; border-radius: 8px; position: relative; }
+.mode-card .mode-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
+}
+.mode-card.exact .mode-badge { background: rgba(56,211,100,0.15); color: var(--green); }
+.mode-card.crossref .mode-badge { background: rgba(88,166,255,0.15); color: var(--blue); }
+.mode-card.vehicle .mode-badge { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.mode-card.spec .mode-badge { background: rgba(188,140,255,0.15); color: var(--purple); }
+.mode-card.equiv .mode-badge { background: rgba(219,109,40,0.15); color: var(--orange); }
+.mode-card.super .mode-badge { background: rgba(248,81,73,0.15); color: var(--red); }
+.mode-card.platform .mode-badge { background: rgba(88,166,255,0.15); color: var(--blue); }
+.mode-card.keyword .mode-badge { background: rgba(139,148,158,0.15); color: var(--text-dim); }
+.mode-card.smart {
+  background: linear-gradient(135deg, rgba(31,111,235,0.15), rgba(137,87,229,0.15));
+  border: 2px solid var(--accent);
+}
+.mode-card.smart .mode-badge { background: rgba(255,255,255,0.15); color: var(--text-bright); }
+.mode-card h4 { margin-top: 0; }
+.mode-card .desc { color: var(--text-dim); font-size: 13px; margin: 6px 0; }
+.mode-card .table-list { font-size: 12px; color: var(--text); margin-top: 8px; }
+.mode-card .table-list b { color: var(--green); }
+
+.stage { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin: 16px 0; }
+.stage-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+.stage-num {
+  background: var(--accent); color: white; padding: 6px 12px; border-radius: 20px;
+  font-weight: 700; font-size: 14px; white-space: nowrap;
+}
+.stage-title { color: var(--text-bright); font-size: 20px; margin: 0; }
+.stage-est { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+.stage-est .num { color: var(--yellow); font-weight: 700; }
+
+.task-list { list-style: none; padding: 0; }
+.task-list li {
+  padding: 8px 12px; border-left: 2px solid var(--border); margin: 4px 0;
+  background: var(--panel-2); border-radius: 0 4px 4px 0;
+}
+.task-list li.done { border-left-color: var(--green); }
+.task-list li.doing { border-left-color: var(--yellow); }
+.task-list li.todo { border-left-color: var(--text-dim); }
+.task-check {
+  display: inline-block; width: 16px; height: 16px; border: 1.5px solid var(--text-dim);
+  border-radius: 3px; margin-right: 8px; vertical-align: text-bottom;
+}
+
+.outcome-box {
+  background: rgba(86,211,100,0.08); border: 1px solid rgba(86,211,100,0.3);
+  padding: 12px 16px; border-radius: 6px; margin: 12px 0;
+}
+.outcome-box .outcome-title { color: var(--green); font-weight: 600; margin-bottom: 6px; font-size: 13px; }
+
+.files-list {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 12px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px;
+  margin: 8px 0;
+}
+.files-list .file-new { color: var(--green); }
+.files-list .file-edit { color: var(--yellow); }
+.files-list .file-del { color: var(--red); }
+
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--text-bright); background: var(--panel-2); font-weight: 600; }
+tr:hover { background: rgba(88,166,255,0.05); }
+.num-r { text-align: right; }
+.num-c { text-align: center; }
+
+.metric-good { color: var(--green); font-weight: 600; }
+.metric-bad { color: var(--red); font-weight: 600; }
+.metric-med { color: var(--yellow); font-weight: 600; }
+
+.dropdown-preview {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 24px; margin: 20px 0; text-align: center;
+}
+.dropdown-preview .fake-search-box {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 12px; max-width: 700px; width: 100%;
+}
+.dropdown-preview select, .dropdown-preview input {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  padding: 6px 8px; border-radius: 4px; font-size: 13px;
+}
+.dropdown-preview input { flex: 1; }
+.dropdown-preview button {
+  background: var(--accent); color: white; border: none; padding: 6px 16px;
+  border-radius: 4px; font-weight: 600; cursor: pointer;
+}
+.dependency-line { color: var(--text-dim); font-size: 12px; font-style: italic; margin: 4px 0 12px; }
+
+.risk-card {
+  background: rgba(248,81,73,0.08); border-left: 3px solid var(--red);
+  padding: 12px 16px; border-radius: 4px; margin: 12px 0;
+}
+.risk-card .risk-title { color: var(--red); font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.warning {
+  background: rgba(210,153,34,0.08); border-left: 3px solid var(--yellow);
+  padding: 12px 16px; border-radius: 4px; margin: 12px 0;
+}
+.warning-title { color: var(--yellow); font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+
+.progress-bar {
+  height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden;
+  margin: 12px 0;
+}
+.progress-fill { height: 100%; background: linear-gradient(90deg, var(--blue), var(--purple)); }
+.progress-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-dim); }
+
+.timeline {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 20px; margin: 16px 0;
+}
+.gantt-row { display: grid; grid-template-columns: 200px 1fr 80px; gap: 12px; align-items: center; margin: 6px 0; }
+.gantt-label { color: var(--text); font-size: 13px; }
+.gantt-bar-container { height: 24px; background: var(--panel-2); border-radius: 3px; position: relative; }
+.gantt-bar {
+  position: absolute; height: 100%; border-radius: 3px;
+  display: flex; align-items: center; padding: 0 8px;
+  color: white; font-size: 11px; font-weight: 600;
+}
+.gantt-days { color: var(--text-dim); font-size: 12px; text-align: right; }
+.gantt-week-header { display: grid; grid-template-columns: 200px 1fr 80px; gap: 12px; font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+.gantt-weeks { display: grid; grid-template-columns: repeat(6, 1fr); }
+.gantt-week-cell { border-left: 1px solid var(--border); padding-left: 4px; }
+
+.checklist-summary {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px;
+  margin-top: 16px;
+}
+.checklist-summary h4 { margin-top: 0; }
+.checklist-summary .item { padding: 4px 0; }
+
+.footer { text-align: center; padding: 40px 0 20px; color: var(--text-dim); font-size: 12px; border-top: 1px solid var(--border); margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- ═════ HEADER ═════ -->
+<div class="header">
+  <h1>Multi-Strategy Parts Search — Implementation Plan</h1>
+  <p>ifritah-parts / qa.ifritah.com  |  Engineering roadmap  |  User-selectable search modes + <b>Smart Search</b> combined mode</p>
+</div>
+
+<!-- ═════ EXECUTIVE SUMMARY ═════ -->
+<h2>Executive Summary</h2>
+<p>
+The database has 14 TecDoc tables loaded (30M cross-refs, 27M specifications, 8.2M documents, 651M vehicle linkages,
+229K supersession chains). The current Go service queries only <b>2 of them</b>. This plan exposes each unused table
+as a <b>selectable search strategy</b> in the UI, plus a <b>Smart Search</b> mode that combines all strategies with
+weighted scoring.
+</p>
+
+<div class="summary-grid">
+  <div class="summary-card blue">
+    <div class="label">Search modes</div>
+    <div class="value">9</div>
+    <div class="sub">1 exact + 6 specialised + 1 keyword + 1 smart combined</div>
+  </div>
+  <div class="summary-card green">
+    <div class="label">Total stages</div>
+    <div class="value">7</div>
+    <div class="sub">From DB layer to production rollout</div>
+  </div>
+  <div class="summary-card orange">
+    <div class="label">Total effort</div>
+    <div class="value">6&ndash;8 wks</div>
+    <div class="sub">~30 engineer-days across stages</div>
+  </div>
+  <div class="summary-card purple">
+    <div class="label">Target metrics</div>
+    <div class="value">92% F1</div>
+    <div class="sub">from current 62.7% F1</div>
+  </div>
+</div>
+
+<!-- ═════ SEARCH MODES OVERVIEW ═════ -->
+<h2>Search Modes — User-Selectable Strategies</h2>
+<p>User picks a mode from a dropdown next to the search box. Each mode uses a different TecDoc table + query strategy.</p>
+
+<div class="dropdown-preview">
+  <div class="fake-search-box">
+    <select>
+      <option>Smart Search (all strategies)</option>
+      <option>Exact OEM match</option>
+      <option>Cross-reference</option>
+      <option>By vehicle fitment</option>
+      <option>By specifications</option>
+      <option>Functional equivalents</option>
+      <option>Supersession chain</option>
+      <option>Cross-brand (Hyundai↔Kia)</option>
+      <option>Keyword fulltext</option>
+    </select>
+    <input placeholder="Search: OEM number, brand, or part name..." value="26300-35505">
+    <button>Search</button>
+  </div>
+  <p style="margin-top: 12px; color: var(--text-dim); font-size: 12px;">Frontend dropdown mock-up — Stage 5 deliverable</p>
+</div>
+
+<div class="mode-grid">
+
+  <div class="mode-card exact">
+    <div class="mode-badge">Mode 1 · Fastest</div>
+    <h4>Exact OEM Match</h4>
+    <div class="desc">Direct hash lookup by normalized OEM number. Sub-100ms response. Highest confidence when hit.</div>
+    <div class="table-list"><b>Tables:</b> <code>oem_number</code> (21.5M) + <code>articles</code></div>
+    <div class="table-list"><b>Query:</b> <code>WHERE clean_number = ?</code></div>
+    <div class="table-list"><b>Confidence:</b> 0.95</div>
+    <div class="table-list"><b>Best for:</b> User types full OEM they already know</div>
+  </div>
+
+  <div class="mode-card crossref">
+    <div class="mode-badge">Mode 2 · Widest brand coverage</div>
+    <h4>Cross-Reference (Aftermarket)</h4>
+    <div class="desc">Query the 30M-row cross-reference index. Returns 30&ndash;50 aftermarket alternatives per OEM.</div>
+    <div class="table-list"><b>Tables:</b> <code>articlecrosses</code> (30M) + <code>articles</code> + <code>ambrand</code></div>
+    <div class="table-list"><b>Query:</b> <code>WHERE oemNumber = ? ORDER BY brandName</code></div>
+    <div class="table-list"><b>Confidence:</b> 0.85</div>
+    <div class="table-list"><b>Best for:</b> Finding cheaper brand alternatives</div>
+  </div>
+
+  <div class="mode-card vehicle">
+    <div class="mode-badge">Mode 3 · By vehicle</div>
+    <h4>Vehicle Fitment Search</h4>
+    <div class="desc">Find every part that fits a specific vehicle. Uses the 651M-row vehicle-tree table.</div>
+    <div class="table-list"><b>Tables:</b> <code>articlesvehicletrees</code> (651M) + <code>linkagetargets</code> + <code>assemblygroupnodes</code></div>
+    <div class="table-list"><b>Query:</b> <code>WHERE linkingTargetId = ? AND assemblyGroupNodeId = ?</code></div>
+    <div class="table-list"><b>Confidence:</b> 0.90 (verified fit)</div>
+    <div class="table-list"><b>Best for:</b> Browse parts by known car (VIN + category)</div>
+  </div>
+
+  <div class="mode-card spec">
+    <div class="mode-badge">Mode 4 · By dimensions</div>
+    <h4>Specification Search</h4>
+    <div class="desc">Match by physical specs (thread size, diameter, capacity). Uses the 27M-row criteria table.</div>
+    <div class="table-list"><b>Tables:</b> <code>articlecriteria</code> (27M) + <code>criteria</code> + <code>keyvalues</code></div>
+    <div class="table-list"><b>Query:</b> Multi-criteria AND with tolerance ranges</div>
+    <div class="table-list"><b>Confidence:</b> 0.80</div>
+    <div class="table-list"><b>Best for:</b> Universal parts (bolts, hoses, filters) where physical fit matters</div>
+  </div>
+
+  <div class="mode-card equiv">
+    <div class="mode-badge">Mode 5 · Same role</div>
+    <h4>Functional Equivalents</h4>
+    <div class="desc">Same-generic-type parts that fit the same vehicle. Different brand, same function.</div>
+    <div class="table-list"><b>Tables:</b> <code>legacy2generic</code> (6.2M) + <code>genericarticlesgroups</code></div>
+    <div class="table-list"><b>Query:</b> Match by <code>genericArticleId</code> + vehicle constraint</div>
+    <div class="table-list"><b>Confidence:</b> 0.85</div>
+    <div class="table-list"><b>Best for:</b> "Show me all oil filters that fit this Tucson"</div>
+  </div>
+
+  <div class="mode-card super">
+    <div class="mode-badge">Mode 6 · Chain forward/back</div>
+    <h4>Supersession Chain</h4>
+    <div class="desc">"This part is replaced by X" or "X replaces this part". Recursive traversal.</div>
+    <div class="table-list"><b>Tables:</b> <code>replacedbyarticles</code> (229K) + <code>replacesarticles</code> (240K)</div>
+    <div class="table-list"><b>Query:</b> Recursive CTE, depth&nbsp;≤10</div>
+    <div class="table-list"><b>Confidence:</b> 0.95 (direct OEM chain)</div>
+    <div class="table-list"><b>Best for:</b> Discontinued part → find current replacement</div>
+  </div>
+
+  <div class="mode-card platform">
+    <div class="mode-badge">Mode 7 · Cross-brand</div>
+    <h4>Hyundai&nbsp;↔&nbsp;Kia Platform</h4>
+    <div class="desc">Tucson/Sportage, Elantra/Forte, Sonata/K5 share parts. Discover cross-brand fits.</div>
+    <div class="table-list"><b>Tables:</b> <code>articlesvehicletrees</code> self-join across manufacturers</div>
+    <div class="table-list"><b>Query:</b> Pre-computed <code>platform_pairs</code> table (offline job)</div>
+    <div class="table-list"><b>Confidence:</b> 0.90</div>
+    <div class="table-list"><b>Best for:</b> Kia Sportage owner searching for cheaper Hyundai Tucson OEM number</div>
+  </div>
+
+  <div class="mode-card keyword">
+    <div class="mode-badge">Mode 8 · Fallback only</div>
+    <h4>Keyword Fulltext</h4>
+    <div class="desc">FULLTEXT search over combined keywords. Only when no OEM number is available. Category-gated.</div>
+    <div class="table-list"><b>Tables:</b> <code>searchindex</code> (5.8M MyISAM FULLTEXT)</div>
+    <div class="table-list"><b>Query:</b> <code>MATCH(keywords) AGAINST(? IN BOOLEAN MODE)</code></div>
+    <div class="table-list"><b>Confidence:</b> 0.65 (sentinel value)</div>
+    <div class="table-list"><b>Best for:</b> Text queries like "oil filter" without a specific part number</div>
+  </div>
+
+  <div class="mode-card smart">
+    <div class="mode-badge">Mode 9 · Recommended · Default</div>
+    <h4>🚀 Smart Search — Combined</h4>
+    <div class="desc">Runs modes 1&ndash;7 in parallel, merges results with weighted scoring, dedupes, and ranks by combined confidence. Falls back to Mode 8 only if all others miss.</div>
+    <div class="table-list"><b>Tables:</b> All 14 TecDoc tables</div>
+    <div class="table-list"><b>Query:</b> Fan-out over 7 goroutines, merge with priority queue</div>
+    <div class="table-list"><b>Confidence:</b> Weighted combination (0.95 exact&gt;0.90 xref&gt;0.85 equiv...)</div>
+    <div class="table-list"><b>Best for:</b> Default user experience — maximum coverage &amp; accuracy</div>
+  </div>
+
+</div>
+
+<!-- ═════ TIMELINE ═════ -->
+<h2>Timeline &amp; Gantt</h2>
+<div class="timeline">
+  <div class="gantt-week-header">
+    <div>Stage</div>
+    <div class="gantt-weeks">
+      <div class="gantt-week-cell">Week 1</div>
+      <div class="gantt-week-cell">Week 2</div>
+      <div class="gantt-week-cell">Week 3</div>
+      <div class="gantt-week-cell">Week 4</div>
+      <div class="gantt-week-cell">Week 5</div>
+      <div class="gantt-week-cell">Week 6</div>
+    </div>
+    <div style="text-align: right;">Days</div>
+  </div>
+
+  <div class="gantt-row">
+    <div class="gantt-label">1. Foundation (DB layer)</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:0%; width:15%; background:#1f6feb;">Stage 1</div></div>
+    <div class="gantt-days">4d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">2. Individual strategies</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:15%; width:30%; background:#238636;">Stage 2</div></div>
+    <div class="gantt-days">8d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">3. API + response schema</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:45%; width:12%; background:#d29922;">Stage 3</div></div>
+    <div class="gantt-days">3d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">4. Smart Search merger</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:57%; width:15%; background:#bc8cff;">Stage 4</div></div>
+    <div class="gantt-days">4d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">5. Frontend dropdown</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:72%; width:12%; background:#db6d28;">Stage 5</div></div>
+    <div class="gantt-days">3d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">6. Testing &amp; QA</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:80%; width:15%; background:#f85149;">Stage 6</div></div>
+    <div class="gantt-days">4d</div>
+  </div>
+  <div class="gantt-row">
+    <div class="gantt-label">7. Rollout &amp; monitor</div>
+    <div class="gantt-bar-container"><div class="gantt-bar" style="left:92%; width:8%; background:#8b949e;">Stage 7</div></div>
+    <div class="gantt-days">2d</div>
+  </div>
+</div>
+
+<!-- ═════ STAGE 1 ═════ -->
+<h2>Stage 1 — Foundation: Database Query Layer</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 1</span>
+    <h3 class="stage-title">Add TecDoc query methods for all 11 unused tables</h3>
+    <span class="stage-est"><span class="num">4 days</span> · 1 backend engineer</span>
+  </div>
+
+  <p><b>Goal:</b> Every TecDoc table gets a dedicated query method in <code>internal/service/tecdoc.go</code>. The service can then compose them into search strategies without the caller writing SQL.</p>
+
+  <h4>Prerequisites</h4>
+  <ul class="task-list">
+    <li class="done"><span class="task-check">✓</span> MySQL connection (already deployed — <code>tecdoc:true</code>)</li>
+    <li class="done"><span class="task-check">✓</span> Existing <code>TecDoc</code> struct with connection pool</li>
+    <li class="done"><span class="task-check">✓</span> Schema documentation at <code>C:\ssda\chatGPT\parts</code></li>
+  </ul>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>1.1</b> Add <code>SearchCrossReferences(oemNumber)</code> — query <code>articlecrosses</code> (30M) directly for aftermarket alternatives with brand.</li>
+    <li class="todo"><span class="task-check"></span><b>1.2</b> Add <code>FindCompatibleVehicles(legacyArticleId)</code> — query <code>articlesvehicletrees</code> (651M) → <code>linkagetargets</code>. Returns list of {linkageTargetId, make, model, year, engine} that this part fits.</li>
+    <li class="todo"><span class="task-check"></span><b>1.3</b> Add <code>FindSpecifications(legacyArticleId)</code> — query <code>articlecriteria</code> (27M) → <code>criteria</code> → <code>keyvalues</code>. Returns [{name: "Thread Size", value: "M20×1.5", unit: "mm"}, ...].</li>
+    <li class="todo"><span class="task-check"></span><b>1.4</b> Add <code>FindDocuments(legacyArticleId)</code> — query <code>articledocs</code> (8.2M) + <code>articlepdfs</code>. Returns list of image/document URLs.</li>
+    <li class="todo"><span class="task-check"></span><b>1.5</b> Add <code>FindSupersession(legacyArticleId)</code> — recursive CTE over <code>replacedbyarticles</code> → returns chain.</li>
+    <li class="todo"><span class="task-check"></span><b>1.6</b> Add <code>FindFunctionalEquivalents(legacyArticleId, vehicleId?)</code> — join <code>legacy2generic</code> + <code>articlesvehicletrees</code>.</li>
+    <li class="todo"><span class="task-check"></span><b>1.7</b> Add <code>FindBySpecification(criteria...)</code> — reverse spec lookup: given "M20×1.5 + 76mm OD" find matching parts.</li>
+    <li class="todo"><span class="task-check"></span><b>1.8</b> Add <code>FindCrossBrandEquivalents(oemNumber, hyundaiVehicleId, kiaVehicleId?)</code> — Hyundai↔Kia platform join.</li>
+    <li class="todo"><span class="task-check"></span><b>1.9</b> Add per-method timeout (2s each) via <code>context.WithTimeout</code> and structured logging (<code>logQueryCtx</code> pattern).</li>
+    <li class="todo"><span class="task-check"></span><b>1.10</b> Unit tests for each method against a test MySQL fixture (or mocked DB).</li>
+  </ul>
+
+  <h4>Files</h4>
+  <div class="files-list">
+    <div><span class="file-edit">MODIFY</span> internal/service/tecdoc.go (add 8 new methods, currently 547 lines)</div>
+    <div><span class="file-new">NEW</span> internal/service/tecdoc_specifications.go</div>
+    <div><span class="file-new">NEW</span> internal/service/tecdoc_supersession.go</div>
+    <div><span class="file-new">NEW</span> internal/service/tecdoc_crossbrand.go</div>
+    <div><span class="file-new">NEW</span> internal/model/specification.go</div>
+    <div><span class="file-new">NEW</span> internal/model/supersession_chain.go</div>
+    <div><span class="file-new">NEW</span> internal/model/compatible_vehicle.go</div>
+    <div><span class="file-new">NEW</span> internal/service/tecdoc_test.go (mock-DB tests)</div>
+  </div>
+
+  <h4>Sample: <code>SearchCrossReferences</code></h4>
+  <pre><code>// SearchCrossReferences returns aftermarket alternatives for an OEM number
+// by querying the 30M-row articlecrosses table directly.
+func (t *TecDoc) SearchCrossReferences(ctx context.Context, oemNumber string, limit int) ([]model.OEMReference, error) {
+    ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+    defer cancel()
+
+    query := `
+        SELECT
+            ac.oemNumber, ac.legacyArticleId, ac.brandName, ac.number,
+            a.articleNumber, a.genericArticleDescription
+        FROM articlecrosses ac
+        JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+        WHERE ac.oemNumber = ?
+        ORDER BY ac.brandName
+        LIMIT ?`
+
+    rows, err := logQueryCtx(t.db, ctx, "TecDoc.SearchCrossReferences", query, oemNumber, limit)
+    if err != nil { return nil, err }
+    defer rows.Close()
+
+    var refs []model.OEMReference
+    for rows.Next() {
+        var ref model.OEMReference
+        if err := rows.Scan(&ref.RawNumber, &ref.LegacyArticleId, &ref.BrandName,
+            &ref.ArticleNumber, &ref.OriginalArticleNumber, &ref.Description); err != nil {
+            continue
+        }
+        ref.Manufacturer = "CROSSREF"
+        refs = append(refs, ref)
+    }
+    return refs, nil
+}</code></pre>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 1 Deliverable / Outcome</div>
+    <ul>
+      <li>All 11 previously-unused TecDoc tables have a dedicated Go query method with timeout + logging.</li>
+      <li>Each method independently unit-tested against fixtures.</li>
+      <li>No API changes yet — this is pure DB-layer plumbing.</li>
+      <li><b>Verification:</b> <code>go test ./internal/service/... -run TestTecDoc</code> passes with &gt;95% coverage on new methods.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 2 ═════ -->
+<h2>Stage 2 — Individual Strategy Implementations</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 2</span>
+    <h3 class="stage-title">Wire each mode as a Strategy interface + implementation</h3>
+    <span class="stage-est"><span class="num">8 days</span> · 1 backend engineer</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stage 1 complete</p>
+  <p><b>Goal:</b> Every one of the 8 individual search modes has its own Go type implementing a shared <code>SearchStrategy</code> interface. Modes are hot-swappable and independently testable.</p>
+
+  <h4>Design: Strategy Pattern</h4>
+  <pre><code>// SearchStrategy is the common interface every mode implements.
+type SearchStrategy interface {
+    Name() string                                           // "exact_oem" | "cross_ref" | ...
+    Confidence() float64                                    // base confidence score
+    Search(ctx context.Context, req SearchRequest) (*SearchResult, error)
+}
+
+type SearchRequest struct {
+    Query            string
+    LinkageTargetId  int
+    VehicleCC        int
+    FuelType         string
+    Category         string
+    Specifications   []model.SpecCriteria  // for mode 4 (spec search)
+    Page, Limit      int
+}
+
+type SearchResult struct {
+    Results          []SmartResult
+    Total            int
+    Strategy         string
+    Latency          time.Duration
+    Warnings         []string
+}</code></pre>
+
+  <h4>Tasks (one per mode)</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>2.1</b> <code>ExactOEMStrategy</code> — wraps <code>OEMLookup.Search</code> + <code>TecDoc.SearchByOEM</code>. Priority 1 in cascade.</li>
+    <li class="todo"><span class="task-check"></span><b>2.2</b> <code>CrossReferenceStrategy</code> — wraps <code>TecDoc.SearchCrossReferences</code>. Priority 2.</li>
+    <li class="todo"><span class="task-check"></span><b>2.3</b> <code>VehicleFitmentStrategy</code> — wraps <code>TecDoc.PartsForVehicle</code>. Priority 3 (requires <code>linkageTargetId</code>).</li>
+    <li class="todo"><span class="task-check"></span><b>2.4</b> <code>SpecificationStrategy</code> — parses spec criteria from query, calls <code>TecDoc.FindBySpecification</code>.</li>
+    <li class="todo"><span class="task-check"></span><b>2.5</b> <code>FunctionalEquivalentStrategy</code> — wraps <code>TecDoc.FindFunctionalEquivalents</code>. Requires seed <code>legacyArticleId</code>.</li>
+    <li class="todo"><span class="task-check"></span><b>2.6</b> <code>SupersessionStrategy</code> — wraps <code>TecDoc.FindSupersession</code>. Requires seed article ID.</li>
+    <li class="todo"><span class="task-check"></span><b>2.7</b> <code>CrossBrandStrategy</code> — wraps <code>TecDoc.FindCrossBrandEquivalents</code>.</li>
+    <li class="todo"><span class="task-check"></span><b>2.8</b> <code>KeywordFulltextStrategy</code> — wraps <code>TecDoc.SearchByKeyword</code> with category-token gate to prevent BUG-1 style false positives.</li>
+    <li class="todo"><span class="task-check"></span><b>2.9</b> Strategy registry: <code>map[string]SearchStrategy</code> constructed at startup.</li>
+    <li class="todo"><span class="task-check"></span><b>2.10</b> Refactor <code>SmartSearch.Search</code> to dispatch to a strategy chosen from <code>SearchMode</code> field in request.</li>
+  </ul>
+
+  <h4>Files</h4>
+  <div class="files-list">
+    <div><span class="file-new">NEW</span> internal/service/strategy.go (interface + registry)</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_exact_oem.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_crossref.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_vehicle.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_specification.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_functional.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_supersession.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_crossbrand.go</div>
+    <div><span class="file-new">NEW</span> internal/service/strategy_keyword.go</div>
+    <div><span class="file-edit">MODIFY</span> internal/service/smart_search.go (add SearchMode dispatch)</div>
+  </div>
+
+  <h4>Category-token gate for keyword mode (fixes BUG-1)</h4>
+  <pre><code>// KeywordFulltextStrategy prevents "oil filter" → "Fuel filter" false positives
+// by requiring the returned description to contain expected category tokens.
+func (s *KeywordFulltextStrategy) Search(ctx context.Context, req SearchRequest) (*SearchResult, error) {
+    rawResults, err := s.tecdoc.SearchByKeyword(req.Query, req.Limit*3)
+    if err != nil { return nil, err }
+
+    expectedTokens := s.categoryTokensFor(req.Query)  // "oil filter" → ["oil", "filter"]
+    filtered := make([]model.OEMReference, 0, len(rawResults))
+    for _, r := range rawResults {
+        if containsAllTokens(r.Description, expectedTokens) {
+            filtered = append(filtered, r)
+        }
+    }
+    return &SearchResult{Results: filtered, Strategy: "keyword_gated"}, nil
+}</code></pre>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 2 Deliverable / Outcome</div>
+    <ul>
+      <li>8 hot-swappable search strategies, each independently testable.</li>
+      <li>Common <code>SearchStrategy</code> interface — new modes can be added without touching existing code.</li>
+      <li>Category-token gate eliminates BUG-1 false positives on keyword fallback.</li>
+      <li><b>Verification:</b> Each strategy has a table-driven test with ≥ 20 real OEM inputs. Overall test count grows by ~200.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 3 ═════ -->
+<h2>Stage 3 — API Layer &amp; Response Schema</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 3</span>
+    <h3 class="stage-title">Add <code>?mode=</code> parameter and enrich response with all TecDoc fields</h3>
+    <span class="stage-est"><span class="num">3 days</span> · 1 backend engineer</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stage 2 complete</p>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>3.1</b> Extend <code>GET /api/search</code> to accept <code>?mode=exact_oem|crossref|vehicle|spec|functional|supersession|crossbrand|keyword|smart</code></li>
+    <li class="todo"><span class="task-check"></span><b>3.2</b> Add <code>GET /api/search/modes</code> — returns the list of supported modes with description, so the UI dropdown is self-documenting.</li>
+    <li class="todo"><span class="task-check"></span><b>3.3</b> Extend <code>SmartResult</code> struct with fields: <code>compatibility</code>, <code>specifications</code>, <code>images</code>, <code>supersession</code>, <code>functionalEquivalents</code>.</li>
+    <li class="todo"><span class="task-check"></span><b>3.4</b> Post-process every returned <code>SmartResult</code>: enrich with the 5 new fields via parallel calls to Stage-1 methods (FindCompatibleVehicles, FindSpecifications, FindDocuments, FindSupersession, FindFunctionalEquivalents).</li>
+    <li class="todo"><span class="task-check"></span><b>3.5</b> Add <code>enrichmentLevel</code> query param (<code>none|basic|full</code>) to control response weight. Default: <code>basic</code> (specs + compatibility only). <code>full</code>: everything. Prevents 100KB responses for autocomplete-style queries.</li>
+    <li class="todo"><span class="task-check"></span><b>3.6</b> Update OpenAPI/Swagger doc.</li>
+    <li class="todo"><span class="task-check"></span><b>3.7</b> Backward-compatibility: default mode = <code>smart</code>, default enrichment = <code>basic</code>. Existing clients see richer responses without breaking.</li>
+  </ul>
+
+  <h4>Response schema</h4>
+  <pre><code>{
+  "query": "26300-35505",
+  "mode": "smart",
+  "searchStrategy": "smart_combined",
+  "strategiesTried": ["exact_oem", "crossref", "vehicle", "functional"],
+  "results": [
+    {
+      "legacyArticleId": 7542954,
+      "articleNumber": "W 811/80",
+      "description": "Oil Filter",
+      "brandName": "MANN-FILTER",
+      "confidence": 0.95,
+      "sourceStrategy": "exact_oem",     // which mode returned this
+      "oemNumbers": [...],
+      "aftermarketAlternatives": [...30+ items],
+      "specifications": [                 // NEW
+        { "name": "Thread Size", "value": "M20 × 1.5", "unit": "mm" },
+        { "name": "Outer Diameter", "value": "76", "unit": "mm" },
+        { "name": "Height", "value": "76", "unit": "mm" }
+      ],
+      "compatibility": [                  // NEW
+        { "linkageTargetId": 10001, "vehicle": "HYUNDAI TUCSON 2.0 MPI (TL)", "years": "2015-2018" },
+        { "linkageTargetId": 20001, "vehicle": "KIA SPORTAGE 2.0 MPI (QL)", "years": "2016-2018" }
+      ],
+      "images": [                         // NEW
+        "https://.../W_811_80_product.jpg",
+        "https://.../W_811_80_installation.pdf"
+      ],
+      "supersession": {                   // NEW
+        "replacedBy": null,
+        "replaces": ["MANN W 811/79"]
+      },
+      "functionalEquivalents": [ ... ]    // NEW — same genericArticleId, different brand
+    }
+  ],
+  "total": 34,
+  "warnings": []
+}</code></pre>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 3 Deliverable / Outcome</div>
+    <ul>
+      <li>API can be queried in any of 9 modes via <code>?mode=</code>.</li>
+      <li>Response is 5&times; richer — specs, compatibility, images, supersession, functional equivalents all populated.</li>
+      <li>Existing clients unbroken (default mode + backward-compatible schema).</li>
+      <li>Swagger doc up-to-date.</li>
+      <li><b>Verification:</b> <code>go test ./internal/handler/... -run TestSearchModes</code> passes for every mode.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 4 ═════ -->
+<h2>Stage 4 — Smart Search Combined Mode</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 4</span>
+    <h3 class="stage-title">Fan-out over 7 strategies, merge/rank/dedupe results</h3>
+    <span class="stage-est"><span class="num">4 days</span> · 1 backend engineer</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stage 2 (strategies) + Stage 3 (API)</p>
+
+  <h4>Algorithm</h4>
+  <pre><code>func (s *SmartSearch) SmartCombined(ctx context.Context, req SearchRequest) (*SearchResult, error) {
+    ctx, cancel := context.WithTimeout(ctx, 3*time.Second)  // hard budget
+    defer cancel()
+
+    // Fan-out: run 7 strategies in parallel
+    type stratResult struct {
+        strategy string
+        results  []SmartResult
+        err      error
+        latency  time.Duration
+    }
+    ch := make(chan stratResult, 7)
+    strategies := []SearchStrategy{
+        s.reg["exact_oem"], s.reg["crossref"], s.reg["vehicle"],
+        s.reg["functional"], s.reg["supersession"], s.reg["crossbrand"],
+        s.reg["spec"],
+    }
+    for _, strat := range strategies {
+        go func(st SearchStrategy) {
+            start := time.Now()
+            r, err := st.Search(ctx, req)
+            ch &lt;- stratResult{st.Name(), r.Results, err, time.Since(start)}
+        }(strat)
+    }
+
+    // Collect (up to 3s each; skip on error/timeout)
+    var allResults []SmartResult
+    strategiesUsed := []string{}
+    for i := 0; i &lt; 7; i++ {
+        select {
+        case r := &lt;-ch:
+            if r.err == nil && len(r.results) > 0 {
+                allResults = append(allResults, r.results...)
+                strategiesUsed = append(strategiesUsed, r.strategy)
+            }
+        case &lt;-ctx.Done():
+            // Global timeout — return what we have
+            goto merge
+        }
+    }
+merge:
+    // Merge/dedupe by legacyArticleId, keep highest confidence
+    merged := dedupeByArticleId(allResults, keepHighestConfidence)
+
+    // Rank by combined confidence:
+    //   score = strategyConfidence * strategyPriority * matchBonus
+    //   priorities: exact_oem=1.0, crossref=0.9, vehicle=0.85, functional=0.8, ...
+    sort.Slice(merged, func(i, j int) bool {
+        return combinedScore(merged[i]) > combinedScore(merged[j])
+    })
+
+    return &SearchResult{
+        Results: merged[:min(req.Limit, len(merged))],
+        Total:   len(merged),
+        Strategy: "smart_combined",
+        StrategiesTried: strategiesUsed,
+    }, nil
+}</code></pre>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>4.1</b> Implement <code>SmartSearch.SmartCombined</code> with the fan-out pattern above.</li>
+    <li class="todo"><span class="task-check"></span><b>4.2</b> Deduplication: same <code>legacyArticleId</code> from multiple strategies → keep highest-confidence version, note which strategies matched.</li>
+    <li class="todo"><span class="task-check"></span><b>4.3</b> Weighted ranking with priority table.</li>
+    <li class="todo"><span class="task-check"></span><b>4.4</b> Match bonus: if same result comes from ≥ 2 strategies, boost confidence by 5%.</li>
+    <li class="todo"><span class="task-check"></span><b>4.5</b> Global 3-second budget; return partial results if some strategies timeout.</li>
+    <li class="todo"><span class="task-check"></span><b>4.6</b> Circuit breaker: if a strategy fails N times in a row, skip it for the next M requests.</li>
+    <li class="todo"><span class="task-check"></span><b>4.7</b> Structured telemetry: log <code>strategyLatencies</code>, <code>resultsFromEachStrategy</code>.</li>
+  </ul>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 4 Deliverable / Outcome</div>
+    <ul>
+      <li><b>Smart Search</b> mode runs all 7 core strategies in parallel with a 3-second hard budget.</li>
+      <li>Results merged, deduped, weighted-ranked.</li>
+      <li>Same-result-from-multiple-strategies boosted (higher confidence).</li>
+      <li>Circuit breaker protects against slow strategies dragging down latency.</li>
+      <li><b>Verification:</b> P95 latency &lt; 3s; per-request output includes which strategies contributed.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 5 ═════ -->
+<h2>Stage 5 — Frontend Dropdown UI</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 5</span>
+    <h3 class="stage-title">Search box + mode selector + per-result strategy badge</h3>
+    <span class="stage-est"><span class="num">3 days</span> · 1 frontend engineer</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stage 3 (API)</p>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>5.1</b> Dropdown component: fetches <code>GET /api/search/modes</code> at load, populates &lt;select&gt; with name + description tooltip.</li>
+    <li class="todo"><span class="task-check"></span><b>5.2</b> Persist selected mode in localStorage. Default: "Smart Search".</li>
+    <li class="todo"><span class="task-check"></span><b>5.3</b> URL query-param support: <code>?mode=crossref</code> deep-links to specific mode.</li>
+    <li class="todo"><span class="task-check"></span><b>5.4</b> Per-result strategy badge: small colored pill on each card showing which strategy returned it ("Cross-reference", "Same fit", etc.).</li>
+    <li class="todo"><span class="task-check"></span><b>5.5</b> "Strategies used" summary bar above results (e.g., <code>Smart Search · used 5 strategies · 34 results in 780ms</code>).</li>
+    <li class="todo"><span class="task-check"></span><b>5.6</b> New result-card fields: specifications table, compatible-vehicles chip list, images carousel, supersession chain link, functional-equivalents section.</li>
+    <li class="todo"><span class="task-check"></span><b>5.7</b> Skeleton loaders per section (some fields load slower than others).</li>
+    <li class="todo"><span class="task-check"></span><b>5.8</b> Accessibility: keyboard navigation for dropdown, aria-label on strategy badges.</li>
+  </ul>
+
+  <h4>UI mockup — dropdown &amp; result card</h4>
+  <div class="dropdown-preview">
+    <div class="fake-search-box">
+      <select style="min-width: 200px;">
+        <option>🚀 Smart Search</option>
+        <option>Exact OEM</option>
+        <option>Cross-reference</option>
+        <option>By vehicle</option>
+        <option>By specifications</option>
+        <option>Functional equivalents</option>
+        <option>Supersession chain</option>
+        <option>Cross-brand (HK↔KIA)</option>
+        <option>Keyword</option>
+      </select>
+      <input placeholder="Search OEM, brand, or part name…" value="97133-D3000">
+      <button>Search</button>
+    </div>
+    <p style="color: var(--text-dim); font-size: 12px; margin-top: 12px;">
+      Mode dropdown becomes the primary user control. Each mode has a tooltip explaining what it does.
+    </p>
+  </div>
+
+  <h4>Files</h4>
+  <div class="files-list">
+    <div><span class="file-new">NEW</span> frontend/src/components/SearchModeSelector.tsx</div>
+    <div><span class="file-new">NEW</span> frontend/src/components/StrategyBadge.tsx</div>
+    <div><span class="file-new">NEW</span> frontend/src/components/SpecificationTable.tsx</div>
+    <div><span class="file-new">NEW</span> frontend/src/components/CompatibilityChips.tsx</div>
+    <div><span class="file-new">NEW</span> frontend/src/components/ImagesCarousel.tsx</div>
+    <div><span class="file-new">NEW</span> frontend/src/components/SupersessionChain.tsx</div>
+    <div><span class="file-edit">MODIFY</span> frontend/src/components/SearchBox.tsx</div>
+    <div><span class="file-edit">MODIFY</span> frontend/src/components/ResultCard.tsx</div>
+  </div>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 5 Deliverable / Outcome</div>
+    <ul>
+      <li>User can pick any of 9 modes from a dropdown.</li>
+      <li>Every result card shows which strategy returned it (badge).</li>
+      <li>All 5 new response fields (specs, compat, images, supersession, equivalents) render in the card.</li>
+      <li>Mode persisted in URL + localStorage — shareable, remembered.</li>
+      <li><b>Verification:</b> Cypress e2e test for each of the 9 modes returning expected UI.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 6 ═════ -->
+<h2>Stage 6 — Testing &amp; QA</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 6</span>
+    <h3 class="stage-title">Per-mode accuracy tests, cross-mode comparison, performance</h3>
+    <span class="stage-est"><span class="num">4 days</span> · 1 QA / 1 backend</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stages 1–5</p>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>6.1</b> Extend <code>golden_cases.json</code> with 100+ samples per mode → 800 total (100 × 8 modes).</li>
+    <li class="todo"><span class="task-check"></span><b>6.2</b> Extend <code>qa_gate</code> to run each case in each mode and produce per-mode Precision/Recall/F1/Accuracy.</li>
+    <li class="todo"><span class="task-check"></span><b>6.3</b> Per-mode scorecard: expected: Exact OEM ≥ 95%, Crossref ≥ 90%, Vehicle ≥ 90%, Spec ≥ 80%, Functional ≥ 85%, Supersession ≥ 90%, Cross-brand ≥ 80%, Keyword ≥ 70% (with category gate).</li>
+    <li class="todo"><span class="task-check"></span><b>6.4</b> Smart Search accuracy target: Precision ≥ 92%, Recall ≥ 90%, F1 ≥ 91%.</li>
+    <li class="todo"><span class="task-check"></span><b>6.5</b> Performance benchmarks: per-mode latency P50/P95/P99 measured with hey/wrk.</li>
+    <li class="todo"><span class="task-check"></span><b>6.6</b> Load test: 100 concurrent queries against Smart Search mode. Target: no timeouts, P95 &lt; 2s.</li>
+    <li class="todo"><span class="task-check"></span><b>6.7</b> Cross-mode consistency: same query in different modes returns overlapping (not conflicting) result sets.</li>
+    <li class="todo"><span class="task-check"></span><b>6.8</b> Update <code>result_quality_test.go</code> to include per-mode dimension checks.</li>
+  </ul>
+
+  <h4>Expected scorecard after all stages</h4>
+  <table>
+    <tr><th>Mode</th><th class="num-r">Target Precision</th><th class="num-r">Target Recall</th><th class="num-r">Target F1</th><th class="num-r">Target P95 latency</th></tr>
+    <tr><td>Exact OEM</td><td class="num-r metric-good">≥95%</td><td class="num-r metric-good">≥80%</td><td class="num-r metric-good">≥87%</td><td class="num-r metric-good">&lt;100ms</td></tr>
+    <tr><td>Cross-reference</td><td class="num-r metric-good">≥90%</td><td class="num-r metric-good">≥85%</td><td class="num-r metric-good">≥87%</td><td class="num-r metric-good">&lt;300ms</td></tr>
+    <tr><td>Vehicle fitment</td><td class="num-r metric-good">≥90%</td><td class="num-r metric-good">≥85%</td><td class="num-r metric-good">≥87%</td><td class="num-r metric-good">&lt;500ms</td></tr>
+    <tr><td>Specifications</td><td class="num-r metric-good">≥85%</td><td class="num-r metric-med">≥70%</td><td class="num-r metric-good">≥77%</td><td class="num-r metric-good">&lt;500ms</td></tr>
+    <tr><td>Functional equivalents</td><td class="num-r metric-good">≥85%</td><td class="num-r metric-good">≥80%</td><td class="num-r metric-good">≥82%</td><td class="num-r metric-good">&lt;500ms</td></tr>
+    <tr><td>Supersession</td><td class="num-r metric-good">≥95%</td><td class="num-r metric-med">≥70%</td><td class="num-r metric-good">≥81%</td><td class="num-r metric-good">&lt;300ms</td></tr>
+    <tr><td>Cross-brand</td><td class="num-r metric-good">≥85%</td><td class="num-r metric-med">≥70%</td><td class="num-r metric-good">≥77%</td><td class="num-r metric-good">&lt;500ms</td></tr>
+    <tr><td>Keyword (gated)</td><td class="num-r metric-med">≥70%</td><td class="num-r metric-good">≥90%</td><td class="num-r metric-good">≥79%</td><td class="num-r metric-good">&lt;800ms</td></tr>
+    <tr style="background: rgba(31,111,235,0.1);"><td><b>Smart Search</b></td><td class="num-r metric-good"><b>≥92%</b></td><td class="num-r metric-good"><b>≥90%</b></td><td class="num-r metric-good"><b>≥91%</b></td><td class="num-r metric-good"><b>&lt;2s</b></td></tr>
+  </table>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 6 Deliverable / Outcome</div>
+    <ul>
+      <li>800+ golden cases across all 8 individual modes + Smart Search.</li>
+      <li>Per-mode P/R/F1/Accuracy scorecard published in CI.</li>
+      <li>Performance report: P50/P95/P99 latency per mode.</li>
+      <li>Load-test evidence: 100 concurrent Smart Search queries, no timeouts.</li>
+      <li><b>Verification:</b> QA gate green — all mode targets met.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ STAGE 7 ═════ -->
+<h2>Stage 7 — Rollout &amp; Monitoring</h2>
+<div class="stage">
+  <div class="stage-header">
+    <span class="stage-num">Stage 7</span>
+    <h3 class="stage-title">Feature flags, A/B, dashboards, error budget</h3>
+    <span class="stage-est"><span class="num">2 days</span> · 1 DevOps / 1 backend</span>
+  </div>
+
+  <p class="dependency-line">Depends on: Stage 6 (all tests green)</p>
+
+  <h4>Tasks</h4>
+  <ul class="task-list">
+    <li class="todo"><span class="task-check"></span><b>7.1</b> Feature-flag each mode independently via ConfigMap / env vars — deploy inactive first.</li>
+    <li class="todo"><span class="task-check"></span><b>7.2</b> Canary release: enable Smart Search for 5% of traffic → 25% → 100% over 3 days.</li>
+    <li class="todo"><span class="task-check"></span><b>7.3</b> A/B test: users on old cascade vs new Smart Search — track satisfaction and query success rate.</li>
+    <li class="todo"><span class="task-check"></span><b>7.4</b> Dashboards: per-mode QPS, P95 latency, error rate, cache hit rate.</li>
+    <li class="todo"><span class="task-check"></span><b>7.5</b> Alerts: P95 latency &gt; 3s on Smart Search; error rate &gt; 1% on any mode.</li>
+    <li class="todo"><span class="task-check"></span><b>7.6</b> Runbook: how to disable a broken mode via feature flag without redeployment.</li>
+    <li class="todo"><span class="task-check"></span><b>7.7</b> Docs: user-facing help page explaining each mode.</li>
+  </ul>
+
+  <div class="outcome-box">
+    <div class="outcome-title">✓ Stage 7 Deliverable / Outcome</div>
+    <ul>
+      <li>All 9 modes deployed to production behind feature flags.</li>
+      <li>Smart Search rolled out to 100% traffic within 3 days.</li>
+      <li>Per-mode observability dashboards live.</li>
+      <li>Auto-alerts wired.</li>
+      <li><b>Verification:</b> 7 days of green metrics — no P0 alerts fired.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ═════ SUCCESS METRICS ═════ -->
+<h2>Success Metrics — Before &amp; After</h2>
+<table>
+  <tr><th>Metric</th><th class="num-r">Current</th><th class="num-r">After Stage 7</th><th class="num-r">Delta</th></tr>
+  <tr><td>Precision (live API)</td><td class="num-r metric-bad">56.9%</td><td class="num-r metric-good">≥92%</td><td class="num-r metric-good">+35 pp</td></tr>
+  <tr><td>Recall (live API)</td><td class="num-r metric-bad">69.8%</td><td class="num-r metric-good">≥90%</td><td class="num-r metric-good">+20 pp</td></tr>
+  <tr><td>F1</td><td class="num-r metric-bad">62.7%</td><td class="num-r metric-good">≥91%</td><td class="num-r metric-good">+28 pp</td></tr>
+  <tr><td>Accuracy</td><td class="num-r metric-bad">45.7%</td><td class="num-r metric-good">≥88%</td><td class="num-r metric-good">+42 pp</td></tr>
+  <tr><td>Aftermarket alts per part</td><td class="num-r metric-bad">3–5</td><td class="num-r metric-good">30–50</td><td class="num-r metric-good">~10&times;</td></tr>
+  <tr><td>Categories at ≥60% brand coverage</td><td class="num-r metric-bad">3/57 (5.3%)</td><td class="num-r metric-good">≥45/57 (79%)</td><td class="num-r metric-good">+74 pp</td></tr>
+  <tr><td>Compatibility populated</td><td class="num-r metric-bad">0%</td><td class="num-r metric-good">100%</td><td class="num-r metric-good">+100 pp</td></tr>
+  <tr><td>Specifications populated</td><td class="num-r metric-bad">0%</td><td class="num-r metric-good">100%</td><td class="num-r metric-good">+100 pp</td></tr>
+  <tr><td>Product images populated</td><td class="num-r metric-bad">0%</td><td class="num-r metric-good">100%</td><td class="num-r metric-good">+100 pp</td></tr>
+  <tr><td>Supersession populated</td><td class="num-r metric-bad">0%</td><td class="num-r metric-good">100%</td><td class="num-r metric-good">+100 pp</td></tr>
+  <tr><td>Query modes exposed to user</td><td class="num-r metric-bad">1 (hidden cascade)</td><td class="num-r metric-good">9 (dropdown)</td><td class="num-r metric-good">+800%</td></tr>
+  <tr><td>P95 latency (Smart Search)</td><td class="num-r metric-bad">&gt;20s (times out)</td><td class="num-r metric-good">&lt;2s</td><td class="num-r metric-good">10&times; faster</td></tr>
+</table>
+
+<!-- ═════ RISKS ═════ -->
+<h2>Risks &amp; Mitigations</h2>
+
+<div class="risk-card">
+  <div class="risk-title">RISK 1 — 651M-row <code>articlesvehicletrees</code> join is expensive</div>
+  <p>Vehicle Fitment and Cross-brand modes could produce &gt; 5s queries under load.</p>
+  <p><b>Mitigation:</b> Pre-compute <code>platform_pairs</code> materialized table (Stage 1). Add per-vehicle Redis cache in Stage 7 (Tier 1 optimization).</p>
+</div>
+
+<div class="risk-card">
+  <div class="risk-title">RISK 2 — Keyword mode still produces junk without a strict gate</div>
+  <p>Without category-token gate, mode 8 will return wrong-category results (BUG-1 style).</p>
+  <p><b>Mitigation:</b> Category-token gate is mandatory (Stage 2.8). If &lt; 2 tokens match, drop the result. Confidence sentinel 0.65 tells UI to warn user.</p>
+</div>
+
+<div class="risk-card">
+  <div class="risk-title">RISK 3 — Smart Search parallel fan-out could stress MySQL</div>
+  <p>7 concurrent queries per user request; 100 concurrent users = 700 concurrent MySQL queries.</p>
+  <p><b>Mitigation:</b> Connection-pool cap at 20; circuit breaker (Stage 4.6); Redis cache for hot vehicles.</p>
+</div>
+
+<div class="risk-card">
+  <div class="risk-title">RISK 4 — Response payload gets too large</div>
+  <p>Full enrichment can push 30-part response past 500KB. Slow on mobile.</p>
+  <p><b>Mitigation:</b> <code>enrichmentLevel=basic|full</code> param (Stage 3.5). Default <code>basic</code>. Frontend fetches <code>full</code> on card expand.</p>
+</div>
+
+<div class="warning">
+  <div class="warning-title">⚠ Not in scope of this plan</div>
+  <ul>
+    <li>Loading missing HK OEMs into TecDoc (e.g. <code>58101-D3A70</code>) — this is data-side work, not code.</li>
+    <li>New brand catalog integrations (MANN, BOSCH, MAHLE APIs) — Tier 3 follow-up after this plan lands.</li>
+    <li>ML-based fitment ranking — reserved for post-launch iteration.</li>
+  </ul>
+</div>
+
+<!-- ═════ FINAL CHECKLIST ═════ -->
+<h2>Final Checklist Summary</h2>
+<div class="checklist-summary">
+  <h4>Stage Completion</h4>
+  <div class="item"><span class="task-check"></span> Stage 1 — Foundation: DB query layer (4 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 2 — Individual strategies (8 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 3 — API + response schema (3 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 4 — Smart Search merger (4 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 5 — Frontend dropdown (3 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 6 — Testing &amp; QA (4 days)</div>
+  <div class="item"><span class="task-check"></span> Stage 7 — Rollout &amp; monitor (2 days)</div>
+  <p style="margin-top: 12px; color: var(--text-dim);">Total: <b>28 engineer-days</b> ≈ <b>6 calendar weeks</b> (1 backend + 1 frontend + 1 QA in parallel from week 3).</p>
+</div>
+
+<div class="progress-bar"><div class="progress-fill" style="width: 0%;"></div></div>
+<div class="progress-label"><span>Overall progress</span><span>0/7 stages complete</span></div>
+
+<div class="footer">
+  <p>Multi-Strategy Parts Search · v1.0 · Generated for ifritah-parts / qa.ifritah.com</p>
+  <p>Update this HTML as stages complete — flip <code>class="todo"</code> to <code>class="done"</code> on each task, tick the progress bar.</p>
+</div>
+
+</div>
+</body>
+</html>

@@ -15,6 +15,9 @@ type OEMCategory struct {
 // Source: Hyundai/Kia parts catalog structure (EPC).
 var prefixMap = map[string]OEMCategory{
 	// ═══ Engine ═══
+	"18":  {System: "Engine", Category: "Ignition System"},
+	"188": {System: "Engine", Category: "Spark Plug & Ignition Coil"},
+	"186": {System: "Engine", Category: "Spark Plug Wire & Ignition"},
 	"21":  {System: "Engine", Category: "Engine Block & Internals"},
 	"211": {System: "Engine", Category: "Cylinder Block"},
 	"213": {System: "Engine", Category: "Crankshaft & Bearings"},

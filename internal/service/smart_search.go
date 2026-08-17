@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"parts-engine/internal/model"
@@ -16,17 +17,26 @@ import (
 
 // SmartSearch provides category-aware parts search with cross-reference expansion.
 type SmartSearch struct {
-	db           *sql.DB
-	parts        *PartsLookup
-	crossRef     *CrossRef
-	oem          *OEMLookup
-	platform     *Platform
-	onlineLookup *PartsOuqService
-	dealerLookup *DealerLookup
-	tecdoc       *TecDoc
-	dependency   *DependencyClassifier
-	offline      bool
-	queries      *store.Queries
+	db               *sql.DB
+	parts            *PartsLookup
+	crossRef         *CrossRef
+	oem              *OEMLookup
+	platform         *Platform
+	onlineLookup     *PartsOuqService
+	dealerLookup     *DealerLookup
+	tecdoc           *TecDoc
+	tecDocCrossRef   *TecDocCrossRef
+	tecDocSpecs      *TecDocSpecifications
+	tecDocDocs       *TecDocDocuments
+	tecDocSuper      *TecDocSupersession
+	tecDocFunctional *TecDocFunctional
+	tecDocVehicle    *TecDocVehicle
+	dependency       *DependencyClassifier
+	offline          bool
+	queries          *store.Queries
+	// Circuit breaker state — per-instance to avoid cross-test contamination.
+	cbFailures sync.Map // string → *atomic.Int64
+	cbDisabled sync.Map // string → time.Time
 }
 
 func NewSmartSearch(db *sql.DB, parts *PartsLookup, crossRef *CrossRef, oem *OEMLookup, platform *Platform, online *PartsOuqService, offline bool) *SmartSearch {
@@ -52,18 +62,47 @@ func (s *SmartSearch) SetTecDoc(td *TecDoc) {
 	s.tecdoc = td
 }
 
+// SetTecDocCrossRef attaches the TecDoc articlecrosses service (S2-T1).
+// When set, searchByOEM will supplement Postgres results with articlecrosses
+// (30M rows) to increase aftermarket brand coverage.
+func (s *SmartSearch) SetTecDocCrossRef(cr *TecDocCrossRef) {
+	s.tecDocCrossRef = cr
+}
+
+// SetTecDocSpecifications attaches the TecDoc specifications enrichment service (S3).
+func (s *SmartSearch) SetTecDocSpecifications(sp *TecDocSpecifications) { s.tecDocSpecs = sp }
+
+// SetTecDocDocuments attaches the TecDoc documents enrichment service (S3).
+func (s *SmartSearch) SetTecDocDocuments(d *TecDocDocuments) { s.tecDocDocs = d }
+
+// SetTecDocSupersession attaches the TecDoc supersession enrichment service (S3).
+func (s *SmartSearch) SetTecDocSupersession(su *TecDocSupersession) { s.tecDocSuper = su }
+
+// SetTecDocFunctional attaches the TecDoc functional equivalents service (S3).
+func (s *SmartSearch) SetTecDocFunctional(f *TecDocFunctional) { s.tecDocFunctional = f }
+
+// SetTecDocVehicle attaches the TecDoc vehicle compatibility service (S3).
+func (s *SmartSearch) SetTecDocVehicle(v *TecDocVehicle) { s.tecDocVehicle = v }
+
 // SmartResult is an enhanced part result with confidence and cross-ref data.
 type SmartResult struct {
 	model.Part
-	Confidence              float64                  `json:"confidence"`
-	ConfidenceNote          string                   `json:"confidenceNote,omitempty"`
-	FitmentDriver           string                   `json:"fitmentDriver"`
-	OEMNumbers              []model.OEMReference     `json:"oemNumbers,omitempty"`
-	BrandResolved           string                   `json:"brand,omitempty"`
-	FitsVehicleCC           int                      `json:"fitsVehicleCC,omitempty"`
-	Substitutions           []model.SubstitutionPart `json:"substitutions,omitempty"`
-	AftermarketAlternatives []model.AftermarketPart  `json:"aftermarketAlternatives,omitempty"`
-	Compatibility           []string                 `json:"compatibility,omitempty"`
+	Confidence              float64                    `json:"confidence"`
+	ConfidenceNote          string                     `json:"confidenceNote,omitempty"`
+	FitmentDriver           string                     `json:"fitmentDriver"`
+	OEMNumbers              []model.OEMReference       `json:"oemNumbers,omitempty"`
+	BrandResolved           string                     `json:"brand,omitempty"`
+	FitsVehicleCC           int                        `json:"fitsVehicleCC,omitempty"`
+	Substitutions           []model.SubstitutionPart   `json:"substitutions,omitempty"`
+	AftermarketAlternatives []model.AftermarketPart    `json:"aftermarketAlternatives,omitempty"`
+	Compatibility           []string                   `json:"compatibility,omitempty"`
+	// S3: enrichment fields
+	Specifications      []model.Specification    `json:"specifications,omitempty"`
+	Documents           []model.Document         `json:"documents,omitempty"`
+	Supersession        *model.SupersessionChain `json:"supersession,omitempty"`
+	FunctionalEquivalents []model.OEMReference   `json:"functionalEquivalents,omitempty"`
+	CompatibleVehicles  []model.CompatibleVehicle `json:"compatibleVehicles,omitempty"`
+	SourceStrategy      string                   `json:"sourceStrategy,omitempty"`
 }
 
 // SmartSearchResponse is the full smart search response.
@@ -74,13 +113,62 @@ type SmartSearchResponse struct {
 	Total          int            `json:"total"`
 	Categories     []string       `json:"categories,omitempty"`
 	SearchStrategy string         `json:"searchStrategy"`
+	Mode           string         `json:"mode,omitempty"`
 	Warnings       []string       `json:"warnings,omitempty"`
 }
 
 // Search runs the smart search engine.
 // It detects query type (OEM number, part number, category text, VIN),
 // then applies category-aware filtering with cross-reference expansion.
+//
+// mode selects a specific search strategy ("exact_oem", "cross_reference",
+// "vehicle_fitment", "supersession", "cross_brand", "spec_match",
+// "assembly_context", "vin_assembly", "combined"). Empty string runs the
+// legacy cascade (backward compat).
+//
+// enrichmentLevel controls post-search enrichment:
+//   "none"  — no TecDoc enrichment (fastest)
+//   "basic" — specifications + compatible vehicles only
+//   "full"  — all: specs + docs + supersession + functional equivalents + compatible vehicles
+// Empty string defaults to "basic".
 func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, fuelType string, category string, page, limit int) (*SmartSearchResponse, error) {
+	return s.SearchWithOptions(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, "", "basic")
+}
+
+// SearchWithOptions is the full entry point used by the handler (S3/S4).
+func (s *SmartSearch) SearchWithOptions(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, mode, enrichmentLevel string) (*SmartSearchResponse, error) {
+	var resp *SmartSearchResponse
+	var err error
+
+	if mode != "" && mode != "combined" {
+		resp, err = s.searchByMode(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode)
+	} else if mode == "combined" {
+		resp, err = s.searchCombined(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	} else {
+		resp, err = s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+	}
+
+	if resp != nil {
+		before := len(resp.Results)
+		resp.Results = dedupeByArticleId(resp.Results)
+		if len(resp.Results) != before {
+			log.Printf("[SmartSearch.Search] dedupeByArticleId removed %d duplicate(s)", before-len(resp.Results))
+		}
+		resp.Total = len(resp.Results)
+		resp.Mode = mode
+
+		if enrichmentLevel != "none" && len(resp.Results) > 0 {
+			resp.Results = s.enrichResults(resp.Results, enrichmentLevel)
+		}
+	}
+	return resp, err
+}
+
+// searchDispatch holds the actual strategy-selection cascade. It is the pre-S0-T2
+// body of Search; kept intact so downstream returns can continue to build a
+// response with whatever total count they compute — dedupeByArticleId in Search()
+// will normalize resp.Total against the final unique-result slice.
+func (s *SmartSearch) searchDispatch(query string, linkageTargetId int, vehicleCC int, fuelType string, category string, page, limit int) (*SmartSearchResponse, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("database not connected")
 	}
@@ -110,15 +198,20 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 			}
 			return resp, nil
 		}
-		// OEM search found nothing — try article lookup then text search
+		// OEM search found nothing — try article lookup (owned catalog).
+		// S0-T1: DO NOT fall through to searchByText for OEM queries. That path
+		// invokes SearchByKeyword (tecdoc_keyword strategy) which returns
+		// wrong-category garbage for OEM misses (root cause of BUG-1, BUG-5,
+		// BUG-9, BUG-10, BUG-11). searchByArticle is safe because it hits the
+		// owned catalog by exact article number. If both miss, return the OEM
+		// response with a warning so the caller sees the miss instead of a
+		// misleading full-text hit.
 		artResp, err := s.searchByArticle(query, linkageTargetId, vehicleCC, limit)
 		if err == nil && artResp.Total > 0 {
 			return artResp, nil
 		}
-		textResp, err := s.searchByText(query, vehicleCC, fuelType, page, limit)
-		if err == nil && textResp.Total > 0 {
-			return textResp, nil
-		}
+		resp.Warnings = append(resp.Warnings,
+			fmt.Sprintf("OEM %q not found; text-search fallback disabled to prevent wrong-category matches (S0-T1)", query))
 		return resp, nil // return original OEM response with warnings
 	case looksLikeArticleNumber(query):
 		resp, err := s.searchByArticle(query, linkageTargetId, vehicleCC, limit)
@@ -135,7 +228,25 @@ func (s *SmartSearch) Search(query string, linkageTargetId int, vehicleCC int, f
 		}
 		return resp, nil
 	case linkageTargetId > 0:
-		return s.searchByVehicle(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		// S0-T3: always run the vehicle search first. If it returns results, return them.
+		// If it returns zero results AND the query is non-empty text (BUG-3), merge in a
+		// text-search pass so the user still gets results instead of nil.
+		vResp, vErr := s.searchByVehicle(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		if vErr != nil {
+			return vResp, vErr
+		}
+		if vResp.Total > 0 || strings.TrimSpace(query) == "" {
+			return vResp, nil
+		}
+		// Vehicle search missed with a text query — fall back to text search and tag results.
+		textResp, textErr := s.searchByText(query, vehicleCC, fuelType, page, limit)
+		if textErr != nil || textResp.Total == 0 {
+			// Return the empty vehicle response (preserves vehicle context + categories).
+			return vResp, nil
+		}
+		textResp.Warnings = append(textResp.Warnings,
+			"No vehicle-linked parts found; showing text-search results — vehicle fitment not confirmed")
+		return textResp, nil
 	default:
 		return s.searchByText(query, vehicleCC, fuelType, page, limit)
 	}
@@ -161,7 +272,11 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 	// HK-scoped data anyway), so a valid HK OEM disguised in a weird
 	// format still gets a chance via the seeded corpus below.
 	scope := IsHKOEM(oemNum)
-	if !scope.IsHK {
+	// Only gate when the OEM number has a recognisable HK format (dashed or flat)
+	// but the prefix belongs to another make (Toyota, BMW, etc.).
+	// Do NOT gate partial OEM stems (e.g. "97133" without the "-D3000" suffix) —
+	// those are format="unknown" and may still be in our seeded catalog.
+	if scope.Format != "unknown" && !scope.IsHK {
 		log.Printf("[SmartSearch.searchByOEM] REJECTED by HK-scope gate: %s", scope.Reason)
 		resp.SearchStrategy = "hk_scope_rejected"
 		resp.Warnings = append(resp.Warnings, scope.Reason)
@@ -263,6 +378,37 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 	sortOEMReferences(refs, oemNum)
 
 	log.Printf("[SmartSearch.searchByOEM] MERGED refs=%d (elapsed=%v)", len(refs), time.Since(start))
+
+	// S2-T1: TecDoc articlecrosses (30M rows) — runs regardless of existing refs.
+	// This is the primary aftermarket brand coverage source. The Postgres
+	// oem_search_index (~1,700 rows) is orders of magnitude smaller; articlecrosses
+	// is the authoritative OEM→aftermarket cross-reference table.
+	// Runs unconditionally so that even when Postgres already has hits we still
+	// surface additional aftermarket brands from TecDoc (brand coverage 7.6% → ~50%).
+	if s.tecDocCrossRef != nil {
+		log.Printf("[SmartSearch.searchByOEM] STEP 2b: TecDoc.SearchCrossReferences")
+		tdCrossRefs, tdCrossErr := s.tecDocCrossRef.SearchCrossReferences(oemNum, limit)
+		if tdCrossErr == nil && len(tdCrossRefs) > 0 {
+			log.Printf("[SmartSearch.searchByOEM] STEP 2b HIT: %d cross-refs (elapsed=%v)", len(tdCrossRefs), time.Since(start))
+			for _, ref := range tdCrossRefs {
+				dup := false
+				for _, existing := range refs {
+					if existing.LegacyArticleId == ref.LegacyArticleId {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					refs = append(refs, ref)
+				}
+			}
+			if resp.SearchStrategy == "oem_crossref" {
+				resp.SearchStrategy = "tecdoc_crossref"
+			}
+		} else if tdCrossErr != nil {
+			log.Printf("[SmartSearch.searchByOEM] STEP 2b ERROR: %v (elapsed=%v)", tdCrossErr, time.Since(start))
+		}
+	}
 
 	if len(refs) == 0 {
 		// Strategy 0: TecDoc full database (oem_number 21.5M + oem_search_index via MySQL)
@@ -572,6 +718,38 @@ buildResults:
 
 	resp.Total = len(resp.Results)
 	return resp, nil
+}
+
+// dedupeByArticleId removes duplicate SmartResult entries whose
+// Part.LegacyArticleId matches an earlier entry. First occurrence wins.
+//
+// Entries with LegacyArticleId == 0 (online lookups, dealer scrapes,
+// aftermarket_crossref_only responses that carry no TecDoc article id) are kept
+// as-is because they cannot be reliably deduplicated by id — de-duplication of
+// those would require string-normalized brand+articleNumber compare, out of
+// scope for S0-T2.
+//
+// This is the single global dedup hook for S0-T2 (fixes BUG-2, BUG-7, BUG-8,
+// BUG-12: same legacyArticleId appearing twice in results).
+func dedupeByArticleId(results []SmartResult) []SmartResult {
+	if len(results) < 2 {
+		return results
+	}
+	seen := make(map[int]bool, len(results))
+	out := make([]SmartResult, 0, len(results))
+	for _, r := range results {
+		if r.LegacyArticleId == 0 {
+			// No reliable id to key on — pass through.
+			out = append(out, r)
+			continue
+		}
+		if seen[r.LegacyArticleId] {
+			continue
+		}
+		seen[r.LegacyArticleId] = true
+		out = append(out, r)
+	}
+	return out
 }
 
 func sortOEMReferences(refs []model.OEMReference, query string) {
@@ -953,6 +1131,54 @@ func (s *SmartSearch) searchByVehicle(textFilter string, linkageTargetId, vehicl
 		resp.Results = append(resp.Results, result)
 	}
 
+	// S2-T4: enrich each result with articlecrosses OEM numbers.
+	// This surfaces aftermarket alternatives for parts found via vehicle search
+	// that have no cross-reference entry in the Postgres oem_search_index.
+	//
+	// Batched: collect all first-OEM-numbers up-front, run ONE
+	// `articlecrosses.cleanCrossNumber IN (?, ?, ...)` query for the whole
+	// vehicle result set. Was N+1 (one query per article); now one query total.
+	if s.tecDocCrossRef != nil && len(resp.Results) > 0 {
+		// Step 1: collect the first OEM number per article via BatchOEMNumbers.
+		articleIds := make([]int, 0, len(resp.Results))
+		for _, r := range resp.Results {
+			if r.LegacyArticleId > 0 {
+				articleIds = append(articleIds, r.LegacyArticleId)
+			}
+		}
+		oemsByArticle, oemErr := s.oem.BatchOEMNumbers(articleIds)
+		if oemErr == nil && len(oemsByArticle) > 0 {
+			// Step 2: collect all first-OEMs and a reverse map back to article ids.
+			seedOEMs := make([]string, 0, len(oemsByArticle))
+			articleByCleanOEM := make(map[string]int, len(oemsByArticle))
+			for articleId, oems := range oemsByArticle {
+				if len(oems) == 0 {
+					continue
+				}
+				seed := oems[0]
+				seedOEMs = append(seedOEMs, seed)
+				articleByCleanOEM[NormalizeOEM(seed)] = articleId
+			}
+			// Step 3: one batched cross-ref query for the whole set.
+			if refsByOEM, batchErr := s.tecDocCrossRef.SearchCrossReferencesBatch(seedOEMs, 20); batchErr == nil {
+				// Step 4: back-map results into resp.Results by article id.
+				resultIdx := make(map[int]int, len(resp.Results))
+				for i, r := range resp.Results {
+					resultIdx[r.LegacyArticleId] = i
+				}
+				for cleanOEM, refs := range refsByOEM {
+					articleId, ok := articleByCleanOEM[cleanOEM]
+					if !ok {
+						continue
+					}
+					if i, ok := resultIdx[articleId]; ok {
+						resp.Results[i].OEMNumbers = append(resp.Results[i].OEMNumbers, refs...)
+					}
+				}
+			}
+		}
+	}
+
 	return resp, nil
 }
 
@@ -1035,13 +1261,25 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 
 	resp.Total = len(resp.Results)
 
-	// TecDoc fulltext search fallback (searchindex 5.8M rows)
+	// TecDoc fulltext search fallback (searchindex 5.8M rows).
+	// S0-T4: gate results by category token. Classify the query text to get the
+	// expected category; reject any returned article whose description does not
+	// match that category. This prevents BUG-1 (e.g. "oil filter" returning
+	// fuel filters or engine mounts via tecdoc_keyword).
 	if len(resp.Results) == 0 && s.tecdoc != nil {
 		tdRefs, tdErr := s.tecdoc.SearchByKeyword(text, limit)
 		if tdErr == nil && len(tdRefs) > 0 {
+			queryRule := ClassifyCategory(text)
 			resp.SearchStrategy = "tecdoc_fulltext"
 			for _, ref := range tdRefs {
-				rule := ClassifyCategory(ref.Description)
+				artRule := ClassifyCategory(ref.Description)
+				// Hard gate: reject the result when the query has a clear category
+				// (not FitUniversal) and the article maps to a different category.
+				if queryRule.Driver != FitUniversal && artRule.Driver != queryRule.Driver {
+					log.Printf("[searchByText] tecdoc_fulltext gated out %q (query_driver=%v article_driver=%v)",
+						ref.Description, queryRule.Driver, artRule.Driver)
+					continue
+				}
 				result := SmartResult{
 					Part: model.Part{
 						LegacyArticleId: ref.LegacyArticleId,
@@ -1051,7 +1289,7 @@ func (s *SmartSearch) searchByText(text string, vehicleCC int, fuelType string, 
 					},
 					Confidence:     0.55,
 					ConfidenceNote: "TecDoc fulltext search (no vehicle context)",
-					FitmentDriver:  driverName(rule.Driver),
+					FitmentDriver:  driverName(artRule.Driver),
 					BrandResolved:  ref.BrandName,
 				}
 				resp.Results = append(resp.Results, result)
@@ -1195,8 +1433,7 @@ func looksLikeOEMNumber(q string) bool {
 	if len(q) < 5 {
 		return false
 	}
-	// HK OEM numbers always start with a digit (e.g. 26300-35505, 97133-D3000)
-	// Aftermarket articles often start with letters (W 811/80, OC 205, C 26 013)
+	// Must start with a digit.
 	if q[0] < '0' || q[0] > '9' {
 		return false
 	}
@@ -1210,7 +1447,13 @@ func looksLikeOEMNumber(q string) bool {
 			dashes++
 		}
 	}
-	// High digit ratio with dashes = likely OEM
+	// S2-T3 (BUG-6): all-digit strings of 5+ chars starting with a digit are
+	// OEM number stems (e.g. "97133"). Route them as OEM first; if the OEM
+	// lookup misses, the cascade falls through to searchByArticle automatically.
+	if digits == len(q) && digits >= 5 {
+		return true
+	}
+	// Classic HK OEM pattern: high digit ratio with at least one dash/space.
 	return digits >= 4 && dashes >= 1
 }
 
@@ -1231,15 +1474,15 @@ func looksLikeArticleNumber(q string) bool {
 			hasDigit = true
 		}
 	}
-	// If it's purely numeric with 5+ digits, likely an article number
-	if !hasLetter && hasDigit && len(q) >= 5 {
-		return true
+	// S2-T3 (BUG-6): purely numeric strings are now handled by looksLikeOEMNumber
+	// (all-digit 5+ char rule). Do not claim them here to avoid the wrong routing.
+	if !hasLetter {
+		return false
 	}
-	// Mix of letters and digits, no spaces, no hyphens = article number
+	// Mix of letters and digits = article number pattern
 	if hasLetter && hasDigit && !strings.ContainsAny(q, "- ") {
 		return true
 	}
-	// If first char is a letter followed by digits = article number pattern
 	if hasLetter && hasDigit {
 		_, err := strconv.Atoi(q)
 		return err != nil && !strings.ContainsRune(q, '-')
