@@ -272,7 +272,11 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 	// HK-scoped data anyway), so a valid HK OEM disguised in a weird
 	// format still gets a chance via the seeded corpus below.
 	scope := IsHKOEM(oemNum)
-	if !scope.IsHK {
+	// Only gate when the OEM number has a recognisable HK format (dashed or flat)
+	// but the prefix belongs to another make (Toyota, BMW, etc.).
+	// Do NOT gate partial OEM stems (e.g. "97133" without the "-D3000" suffix) —
+	// those are format="unknown" and may still be in our seeded catalog.
+	if scope.Format != "unknown" && !scope.IsHK {
 		log.Printf("[SmartSearch.searchByOEM] REJECTED by HK-scope gate: %s", scope.Reason)
 		resp.SearchStrategy = "hk_scope_rejected"
 		resp.Warnings = append(resp.Warnings, scope.Reason)
