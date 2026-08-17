@@ -1134,25 +1134,47 @@ func (s *SmartSearch) searchByVehicle(textFilter string, linkageTargetId, vehicl
 	// S2-T4: enrich each result with articlecrosses OEM numbers.
 	// This surfaces aftermarket alternatives for parts found via vehicle search
 	// that have no cross-reference entry in the Postgres oem_search_index.
-	// Batched: collect all legacyArticleIds, one cross-ref lookup per article.
+	//
+	// Batched: collect all first-OEM-numbers up-front, run ONE
+	// `articlecrosses.cleanCrossNumber IN (?, ?, ...)` query for the whole
+	// vehicle result set. Was N+1 (one query per article); now one query total.
 	if s.tecDocCrossRef != nil && len(resp.Results) > 0 {
-		for i, result := range resp.Results {
-			if result.LegacyArticleId <= 0 {
-				continue
+		// Step 1: collect the first OEM number per article via BatchOEMNumbers.
+		articleIds := make([]int, 0, len(resp.Results))
+		for _, r := range resp.Results {
+			if r.LegacyArticleId > 0 {
+				articleIds = append(articleIds, r.LegacyArticleId)
 			}
-			// Use the article ID as a proxy OEM key — TecDoc cross-ref can resolve it
-			// to OEM numbers via the articlecrosses table.
-			oemNums, oemErr := s.oem.OEMNumbersForArticle(result.LegacyArticleId)
-			if oemErr != nil || len(oemNums) == 0 {
-				continue
-			}
-			// Take the first OEM number and look up cross-references for richer brand data.
-			if refs, refErr := s.tecDocCrossRef.SearchCrossReferences(oemNums[0], 20); refErr == nil {
-				var oemRefs []model.OEMReference
-				for _, ref := range refs {
-					oemRefs = append(oemRefs, ref)
+		}
+		oemsByArticle, oemErr := s.oem.BatchOEMNumbers(articleIds)
+		if oemErr == nil && len(oemsByArticle) > 0 {
+			// Step 2: collect all first-OEMs and a reverse map back to article ids.
+			seedOEMs := make([]string, 0, len(oemsByArticle))
+			articleByCleanOEM := make(map[string]int, len(oemsByArticle))
+			for articleId, oems := range oemsByArticle {
+				if len(oems) == 0 {
+					continue
 				}
-				resp.Results[i].OEMNumbers = oemRefs
+				seed := oems[0]
+				seedOEMs = append(seedOEMs, seed)
+				articleByCleanOEM[NormalizeOEM(seed)] = articleId
+			}
+			// Step 3: one batched cross-ref query for the whole set.
+			if refsByOEM, batchErr := s.tecDocCrossRef.SearchCrossReferencesBatch(seedOEMs, 20); batchErr == nil {
+				// Step 4: back-map results into resp.Results by article id.
+				resultIdx := make(map[int]int, len(resp.Results))
+				for i, r := range resp.Results {
+					resultIdx[r.LegacyArticleId] = i
+				}
+				for cleanOEM, refs := range refsByOEM {
+					articleId, ok := articleByCleanOEM[cleanOEM]
+					if !ok {
+						continue
+					}
+					if i, ok := resultIdx[articleId]; ok {
+						resp.Results[i].OEMNumbers = append(resp.Results[i].OEMNumbers, refs...)
+					}
+				}
 			}
 		}
 	}

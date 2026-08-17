@@ -53,6 +53,14 @@ func NewRecallsHandler(svc *service.RecallsClient) *RecallsHandler {
 // Returns 200 with an empty recalls list when the NHTSA API is unavailable
 // (rate-limited, network error, or empty results) so callers can treat
 // recalls as best-effort without treating the absence as a server error.
+//
+// Observability: the X-NHTSA-Available response header signals whether the
+// upstream call succeeded. Values:
+//   - "true"  — NHTSA returned successfully (may still have zero recalls)
+//   - "false" — NHTSA request failed; recalls list is empty because of the
+//              upstream error, NOT because there are no recalls
+// Callers that must distinguish these cases can key on this header rather
+// than on HTTP status (both are 200 by design).
 func (h *RecallsHandler) ByVIN(c *gin.Context) {
 	vehicleMake := c.Query("make")
 	model := c.Query("model")
@@ -69,6 +77,7 @@ func (h *RecallsHandler) ByVIN(c *gin.Context) {
 	if err != nil {
 		// NHTSA API failures are non-fatal: return 200 with empty list and a warning.
 		// Callers (QA gate, frontend) treat empty recalls gracefully.
+		c.Header("X-NHTSA-Available", "false")
 		c.JSON(http.StatusOK, gin.H{
 			"make":    vehicleMake,
 			"model":   model,
@@ -80,6 +89,7 @@ func (h *RecallsHandler) ByVIN(c *gin.Context) {
 		return
 	}
 
+	c.Header("X-NHTSA-Available", "true")
 	c.JSON(http.StatusOK, gin.H{
 		"make":    vehicleMake,
 		"model":   model,

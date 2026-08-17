@@ -106,6 +106,8 @@ func (s *SmartSearch) AvailableModes() []SearchMode {
 		{Key: "vehicle_fitment", Name: "Vehicle Fitment", Description: "All parts linked to your specific vehicle from the TecDoc vehicle-part table"},
 		{Key: "supersession", Name: "Supersession Chain", Description: "Walk the OEM replacement chain to find current and successor part numbers"},
 		{Key: "cross_brand", Name: "Cross Brand", Description: "Hyundai ↔ Kia platform equivalents — parts that fit both brands"},
+		{Key: "owned_catalog", Name: "Owned Catalog", Description: "Direct lookup against the owned hk_parts_cache — fast, exact article-number match"},
+		{Key: "keyword_gated", Name: "Keyword (Gated)", Description: "TecDoc full-text search filtered by category so 'oil filter' cannot return 'strut mounting'"},
 		{Key: "combined", Name: "Smart Search", Description: "Automatically runs all strategies in parallel and merges the best results"},
 	}
 	// Conditionally add modes that require TecDoc services.
@@ -135,6 +137,10 @@ func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 		return &SupersessionStrategy{search: s}
 	case "cross_brand":
 		return &CrossBrandStrategy{search: s}
+	case "owned_catalog":
+		return &OwnedCatalogStrategy{search: s}
+	case "keyword_gated":
+		return &KeywordGatedStrategy{search: s}
 	case "spec_match", "assembly_context", "vin_assembly":
 		if s.tecDocSpecs == nil {
 			return nil
@@ -175,6 +181,8 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		&VehicleFitmentStrategy{search: s},
 		&SupersessionStrategy{search: s},
 		&CrossBrandStrategy{search: s},
+		&OwnedCatalogStrategy{search: s},
+		&KeywordGatedStrategy{search: s},
 	}
 	if s.tecDocSpecs != nil {
 		strategies = append(strategies,
@@ -495,6 +503,89 @@ func (st *CrossBrandStrategy) Search(ctx context.Context, req StrategyRequest) (
 			Confidence:     0.85,
 			ConfidenceNote: "Cross-brand platform equivalent",
 			FitmentDriver:  driverName(rule.Driver),
+			BrandResolved:  ref.BrandName,
+		})
+	}
+	return results, nil
+}
+
+// OwnedCatalogStrategy queries the local hk_parts_cache (Postgres) by article
+// number, bypassing all TecDoc paths. Useful when you know the part is in the
+// owned catalog and want a fast lookup without cross-ref noise.
+type OwnedCatalogStrategy struct{ search *SmartSearch }
+
+func (st *OwnedCatalogStrategy) Name() string           { return "owned_catalog" }
+func (st *OwnedCatalogStrategy) ConfidenceBase() float64 { return 0.98 }
+func (st *OwnedCatalogStrategy) Priority() float64       { return 0.90 }
+func (st *OwnedCatalogStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
+	key := req.OEM
+	if key == "" {
+		key = req.Query
+	}
+	if key == "" || st.search.parts == nil {
+		return nil, nil
+	}
+	parts, err := st.search.parts.FindByArticleNumber(key, req.LinkageTargetId, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]SmartResult, 0, len(parts))
+	for _, p := range parts {
+		rule := ClassifyCategory(p.Description)
+		results = append(results, SmartResult{
+			Part:          p,
+			Confidence:    0.98,
+			ConfidenceNote: "Owned catalog exact match",
+			FitmentDriver: driverName(rule.Driver),
+			BrandResolved: p.BrandName,
+		})
+	}
+	return results, nil
+}
+
+// KeywordGatedStrategy runs TecDoc keyword full-text search but gates each
+// result by category so a query like "oil filter" never returns wrong-category
+// parts. Confidence is capped at 0.65 — the tecdoc_keyword sentinel — so
+// higher-confidence matches from other strategies always outrank it.
+//
+// See BUG-1 in BUGS.md: without the category gate, tecdoc_keyword returns
+// junk like "strut mounting" for "oil filter" queries.
+type KeywordGatedStrategy struct{ search *SmartSearch }
+
+func (st *KeywordGatedStrategy) Name() string           { return "keyword_gated" }
+func (st *KeywordGatedStrategy) ConfidenceBase() float64 { return 0.65 }
+func (st *KeywordGatedStrategy) Priority() float64       { return 0.50 }
+func (st *KeywordGatedStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
+	if req.Query == "" || st.search.tecdoc == nil {
+		return nil, nil
+	}
+	tdRefs, err := st.search.tecdoc.SearchByKeyword(req.Query, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	// Same category-token gate used inside searchByText — reject articles whose
+	// classified driver doesn't match the query's classified driver.
+	queryRule := ClassifyCategory(req.Query)
+	results := make([]SmartResult, 0, len(tdRefs))
+	for _, ref := range tdRefs {
+		if ref.LegacyArticleId <= 0 {
+			continue
+		}
+		artRule := ClassifyCategory(ref.Description)
+		if queryRule.Driver != FitUniversal && artRule.Driver != queryRule.Driver {
+			// Wrong category — reject silently
+			continue
+		}
+		results = append(results, SmartResult{
+			Part: model.Part{
+				LegacyArticleId: ref.LegacyArticleId,
+				ArticleNumber:   ref.ArticleNumber,
+				Description:     ref.Description,
+				BrandName:       ref.BrandName,
+			},
+			Confidence:     0.65,
+			ConfidenceNote: "Keyword search (category-gated)",
+			FitmentDriver:  driverName(artRule.Driver),
 			BrandResolved:  ref.BrandName,
 		})
 	}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"parts-engine/internal/model"
 )
 
 // stubCrossRefRepo is a table-driven stub for TecDocCrossRef tests.
@@ -25,6 +27,22 @@ func (s *stubCrossRefRepo) QueryCrossRefs(_ context.Context, cleanOEM string, li
 		return nil, s.err
 	}
 	return s.rows, nil
+}
+
+// QueryCrossRefsBatch is the batched form for S2-T4. Stub distributes the
+// same fixture rows across the requested OEMs so tests can assert the batch
+// path is wired.
+func (s *stubCrossRefRepo) QueryCrossRefsBatch(_ context.Context, cleanOEMs []string, limit int) (map[string][]crossRefRow, error) {
+	s.callCount++
+	s.lastLimit = limit
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[string][]crossRefRow, len(cleanOEMs))
+	for _, oem := range cleanOEMs {
+		out[oem] = s.rows
+	}
+	return out, nil
 }
 
 func TestTecDocCrossRefSearchCrossReferences(t *testing.T) {
@@ -172,4 +190,61 @@ func TestTecDocCrossRefNilDBConstructor(t *testing.T) {
 	if _, err := svc.SearchCrossReferences("X", 5); err == nil {
 		t.Fatalf("expected 'database not connected' when constructed with nil DB")
 	}
+}
+
+// TestTecDocCrossRefBatch_SingleCallForManyOEMs verifies the S2-T4 batching:
+// N OEM numbers go through ONE call to QueryCrossRefsBatch (not N per-OEM calls).
+func TestTecDocCrossRefBatch_SingleCallForManyOEMs(t *testing.T) {
+	repo := &stubCrossRefRepo{
+		rows: []crossRefRow{{
+			RawCrossNumber: "MANN W712/4",
+			LegacyArticleId: 999,
+			BrandName:      "MANN",
+		}},
+	}
+	svc := &TecDocCrossRef{repo: repo}
+	out, err := svc.SearchCrossReferencesBatch([]string{"26300-35505", "26300-35530", "97133-D3000"}, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.callCount != 1 {
+		t.Errorf("expected exactly 1 batch call for 3 OEMs, got %d", repo.callCount)
+	}
+	// Should have entries for each normalised OEM
+	if len(out) != 3 {
+		t.Errorf("expected 3 keys in output map, got %d", len(out))
+	}
+	// Each key should be the normalised form
+	if _, ok := out["2630035505"]; !ok {
+		t.Errorf("missing normalised key '2630035505'; got keys: %v", keysOf(out))
+	}
+}
+
+func TestTecDocCrossRefBatch_DedupesInput(t *testing.T) {
+	repo := &stubCrossRefRepo{rows: []crossRefRow{}}
+	svc := &TecDocCrossRef{repo: repo}
+	// Same OEM 5 times — should be deduped to 1 lookup
+	_, _ = svc.SearchCrossReferencesBatch([]string{"X-1", "X-1", "X-1", "X-1", "X-1"}, 5)
+	if repo.callCount != 1 {
+		t.Errorf("expected 1 call after dedup, got %d", repo.callCount)
+	}
+}
+
+func TestTecDocCrossRefBatch_EmptyInput(t *testing.T) {
+	svc := &TecDocCrossRef{repo: &stubCrossRefRepo{}}
+	out, err := svc.SearchCrossReferencesBatch(nil, 5)
+	if err != nil {
+		t.Errorf("empty input err=%v, want nil", err)
+	}
+	if len(out) != 0 {
+		t.Errorf("empty input returned %d entries, want 0", len(out))
+	}
+}
+
+func keysOf(m map[string][]model.OEMReference) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }

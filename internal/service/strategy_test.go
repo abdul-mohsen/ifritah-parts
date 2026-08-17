@@ -22,6 +22,8 @@ func TestSearchStrategy_InterfaceContract(t *testing.T) {
 		&VehicleFitmentStrategy{search: s},
 		&SupersessionStrategy{search: s},
 		&CrossBrandStrategy{search: s},
+		&OwnedCatalogStrategy{search: s},
+		&KeywordGatedStrategy{search: s},
 		&SpecMatchStrategy{search: s},
 		&AssemblyContextStrategy{search: s},
 		&VinAssemblyStrategy{search: s},
@@ -82,7 +84,7 @@ func TestAvailableModes_MinimalRegistry(t *testing.T) {
 		keys[m.Key] = true
 	}
 	// Base modes MUST always be present
-	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "combined"}
+	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "combined"}
 	for _, want := range baseModes {
 		if !keys[want] {
 			t.Errorf("AvailableModes() missing base mode %q; got %v", want, keys)
@@ -565,5 +567,87 @@ func TestIsSafetyCritical_IgnoresNonCritical(t *testing.T) {
 	specs := []model.Specification{{Name: "Height", Value: "150mm"}}
 	if isSafetyCritical(specs) {
 		t.Errorf("isSafetyCritical(height) = true, want false")
+	}
+}
+
+// ─── New strategy wrappers (S4-T2 completion) ─────────────────────────────
+
+// TestOwnedCatalogStrategy_EmptyInput_ReturnsNil verifies short-circuit
+// when neither OEM nor Query is provided.
+func TestOwnedCatalogStrategy_EmptyInput_ReturnsNil(t *testing.T) {
+	strategy := &OwnedCatalogStrategy{search: &SmartSearch{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	results, err := strategy.Search(ctx, StrategyRequest{Limit: 10})
+	if err != nil {
+		t.Errorf("OwnedCatalogStrategy empty input err=%v, want nil", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("OwnedCatalogStrategy empty input returned %d, want 0", len(results))
+	}
+}
+
+// TestKeywordGatedStrategy_EmptyQuery_ReturnsNil verifies short-circuit.
+func TestKeywordGatedStrategy_EmptyQuery_ReturnsNil(t *testing.T) {
+	strategy := &KeywordGatedStrategy{search: &SmartSearch{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	results, err := strategy.Search(ctx, StrategyRequest{Limit: 10})
+	if err != nil {
+		t.Errorf("KeywordGatedStrategy empty query err=%v, want nil", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("KeywordGatedStrategy empty query returned %d, want 0", len(results))
+	}
+}
+
+// TestKeywordGatedStrategy_ConfidenceCapped verifies confidence stays at 0.65
+// (the tecdoc_keyword sentinel) so higher-confidence strategies always outrank it.
+func TestKeywordGatedStrategy_ConfidenceCapped(t *testing.T) {
+	s := &SmartSearch{}
+	strategy := &KeywordGatedStrategy{search: s}
+	if got := strategy.ConfidenceBase(); got != 0.65 {
+		t.Errorf("KeywordGated ConfidenceBase = %f, want 0.65 (tecdoc_keyword sentinel)", got)
+	}
+	if got := strategy.Priority(); got >= (&ExactOEMStrategy{search: s}).Priority() {
+		t.Errorf("KeywordGated Priority (%f) must be < ExactOEM (%f)", got, (&ExactOEMStrategy{search: s}).Priority())
+	}
+}
+
+// TestOwnedCatalogStrategy_PriorityHigherThanKeyword verifies the ordering:
+// owned-catalog exact hits outrank the fuzzy keyword path.
+func TestOwnedCatalogStrategy_PriorityHigherThanKeyword(t *testing.T) {
+	s := &SmartSearch{}
+	owned := (&OwnedCatalogStrategy{search: s}).Priority()
+	keyword := (&KeywordGatedStrategy{search: s}).Priority()
+	if owned <= keyword {
+		t.Errorf("owned_catalog priority (%f) must be > keyword_gated (%f)", owned, keyword)
+	}
+}
+
+// TestAvailableModes_IncludesNewWrappers confirms owned_catalog and keyword_gated
+// are exposed to callers (S4-T2 was previously incomplete).
+func TestAvailableModes_IncludesNewWrappers(t *testing.T) {
+	s := &SmartSearch{}
+	keys := map[string]bool{}
+	for _, m := range s.AvailableModes() {
+		keys[m.Key] = true
+	}
+	for _, want := range []string{"owned_catalog", "keyword_gated"} {
+		if !keys[want] {
+			t.Errorf("AvailableModes() missing %q — S4-T2 wrapper not registered", want)
+		}
+	}
+}
+
+// TestStrategyForMode_ReturnsNewWrappers verifies the mode-router maps to
+// the actual struct types.
+func TestStrategyForMode_ReturnsNewWrappers(t *testing.T) {
+	s := &SmartSearch{}
+	if _, ok := s.strategyForMode("owned_catalog").(*OwnedCatalogStrategy); !ok {
+		t.Errorf("strategyForMode('owned_catalog') did not return *OwnedCatalogStrategy")
+	}
+	if _, ok := s.strategyForMode("keyword_gated").(*KeywordGatedStrategy); !ok {
+		t.Errorf("strategyForMode('keyword_gated') did not return *KeywordGatedStrategy")
 	}
 }
