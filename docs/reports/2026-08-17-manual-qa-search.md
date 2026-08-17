@@ -192,3 +192,68 @@ Full CSV at `C:\Users\ALMAAB~1\AppData\Local\Temp\opencode\qa-audit.csv`.
 3. Re-run the audit matrix in §7.
 4. Update this file with the "After (actual)" column.
 5. Enable `DEBUG_LOGS=1` on qa so `/api/debug/logs` streams for the round-two audit.
+
+---
+
+## 9. Round-Two Re-Test (2026-08-17 22:11 — PR #12 NOT yet deployed)
+
+Re-ran the same audit against live qa.ifritah.com to confirm state change. **PR #12 has NOT been deployed yet** (evidenced by `?mode=legacy` returning `n=0` — the server doesn't know that mode).
+
+### 9.1 Live comparison — Before vs After
+
+| OEM | Test | Before (first audit) | After (re-test) | Verdict |
+|---|---|---|---|---|
+| 82460-2T010 | legacy(default) | T (15.1 s, n=0) | T (15.1 s, n=0) | **SAME** |
+| 82460-2T010 | combined | T (15.1 s, n=0) | W (10.6 s, 7 × Pressure Hose) | **WORSE** — bug now visible instead of hidden by timeout |
+| 82460-2T010 | exact_oem | T (15.1 s, n=0) | OK (8.7 s, FRONT WINDOW MOTOR) | **IMPROVED** (scraper cache warmed) |
+| 82460-2T010 | keyword_gated | W (0.8 s, Pressure Hose) | W (0.4 s, Pressure Hose) | **SAME BUG** |
+| 82460-2T010 | mode=legacy | N/A (new mode) | n=0 (unknown mode) | **NOT DEPLOYED** |
+| 26350-2J001 | legacy(default) | T (15.1 s, n=0) | OK (10.6 s, ENGINE OIL FILTER) | **IMPROVED** (cache warm) |
+| 26350-2J001 | combined | W (9.4 s, 10 × Wheel Bearing) | W (8.1 s, 10 × Wheel Bearing) | **SAME BUG** |
+| 26350-2J001 | exact_oem | OK (5.8 s, OIL FILTER) | OK (7.9 s, ENGINE OIL FILTER) | **SAME** (correct both times) |
+| 26350-2J001 | keyword_gated | W (0.9 s, 10 wrong) | W (0.3 s, 10 wrong) | **SAME BUG** |
+| 26300-35505 | all modes | mostly T/W | mostly T/W (Rod/Strut) | **SAME** (TecDoc data gap) |
+| 97133-D3000 | legacy(default) | OK (14.9 s, Filter interior) | OK (13.6 s, Filter interior) | **SAME** (correct) |
+| 97133-D3000 | combined | T (15.1 s, n=0) | OK (13.6 s, Filter interior) | **IMPROVED** (cache warm) |
+| 97133-D3000 | keyword_gated | W (0.9 s, Wheel Bearing) | W (0.3 s, Wheel Bearing) | **SAME BUG** |
+
+### 9.2 Overall verdict
+
+| Category | Count | Notes |
+|---|---:|---|
+| **SAME BUG** | 5 | The three core defects still present on qa — keyword pollution × 4, combined-mode legacy-missing × 1 |
+| **IMPROVED (cache warm)** | 3 | Not attributable to code fix — scraper caches warmed by earlier test runs |
+| **WORSE** | 1 | `82460-2T010 combined` — bug now visible instead of hidden by timeout |
+| **SAME (correct)** | 3 | Already working before |
+| **NOT DEPLOYED** | 1 | `mode=legacy` unknown to server — confirms PR #12 not shipped |
+
+**Net verdict on qa.ifritah.com: state UNCHANGED.** The three core defects are still reproducible verbatim. Improvements seen are pure upstream-cache effects, not code-fix effects.
+
+### 9.3 Local (fix-branch) verdict
+
+| Check | Result |
+|---|---|
+| `go build ./...` | ✓ clean |
+| `go vet ./...` | ✓ clean |
+| `go test ./internal/service/... ./internal/handler/... ./internal/middleware/...` | ✓ 3 packages green |
+| 8 new tests (isMostlyDigits, LegacyCascade, KeywordGated OEM guard, mode dispatch) | ✓ all pass |
+| PR #12 CI: `build`, `govulncheck`, `quality-gate` | ✓ all green, MERGEABLE |
+
+### 9.4 Bugs found in this round
+
+- None new. The three defects from §1 are still the entire story.
+- **Data gap on `26300-35505`** is confirmed as a genuine TecDoc coverage hole — not a bug in code, but a P1 backlog item.
+- **Second-order symptom:** `82460-2T010 combined` moved from timeout → wrong-answer. This is actually revealing that when the scraper cache is warm, combined-mode returns keyword-gated pollution instead of the correct dealer_lookup result — because it doesn't call `searchDispatch`. PR #12 fixes exactly this.
+
+### 9.5 Recommendation
+
+**Merge PR #12 and deploy.** Then re-run §7 script; expected outcomes:
+
+| OEM | mode=combined expected after deploy |
+|---|---|
+| 82460-2T010 | `FRONT POWER WINDOW MOTOR ASSEMBLY` from legacy sub-strategy (dealer_lookup), keyword_gated returns 0 |
+| 26350-2J001 | `ENGINE OIL FILTER` from exact_oem sub-strategy, keyword_gated returns 0 |
+| 26300-35505 | 0 results (honest — TecDoc data gap, keyword pollution suppressed) |
+| 97133-D3000 | `Filter, interior air` (unchanged, already correct) |
+
+All fan-outs bounded to 3 s max via the `dealer_lookup` + `partsouq` client timeout cuts.
