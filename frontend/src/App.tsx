@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import VinInput from './components/VinInput';
 import OemSearch from './components/OemSearch';
 import Catalog from './components/Catalog';
+import { DebugOverlay } from './components/DebugOverlay';
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -61,6 +62,9 @@ export default function App() {
           <Route path="/catalog" element={<Catalog />} />
         </Routes>
       </Layout>
+      {/* Dev log overlay — only rendered in dev mode (Vite import.meta.env.DEV).
+          Connects to /api/debug/logs SSE endpoint when DEBUG_LOGS=1 is set on the server. */}
+      {import.meta.env.DEV && <DebugOverlay />}
     </BrowserRouter>
   );
 }

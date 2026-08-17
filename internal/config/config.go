@@ -50,6 +50,11 @@ type Config struct {
 	// InternalAPIKey guards /api/internal/* endpoints.
 	// Set via INTERNAL_API_KEY env var. When empty the routes are disabled.
 	InternalAPIKey string
+
+	// DebugLogs enables the /api/debug/logs SSE endpoint and verbose
+	// request tracing. Set DEBUG_LOGS=1 in the environment to activate.
+	// Never enable in production — the log stream has no auth gate.
+	DebugLogs bool
 }
 
 func Load() *Config {
@@ -75,7 +80,8 @@ func Load() *Config {
 		ElasticURL:      envOr("ELASTIC_URL", "http://localhost:9200"),
 		NHTSABaseURL:    envOr("NHTSA_URL", "https://vpic.nhtsa.dot.gov/api"),
 		NHTSARecallsURL: envOr("NHTSA_RECALLS_URL", "https://api.nhtsa.gov/recalls"),
-		InternalAPIKey:  os.Getenv("INTERNAL_API_KEY"),
+		InternalAPIKey:   os.Getenv("INTERNAL_API_KEY"),
+		DebugLogs:        os.Getenv("DEBUG_LOGS") == "1",
 	}
 }
 
