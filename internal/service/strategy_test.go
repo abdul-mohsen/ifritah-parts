@@ -17,6 +17,7 @@ import (
 func TestSearchStrategy_InterfaceContract(t *testing.T) {
 	s := &SmartSearch{}
 	strategies := []SearchStrategy{
+		&CacheStrategy{search: s},
 		&LegacyCascadeStrategy{search: s},
 		&ExactOEMStrategy{search: s},
 		&CrossReferenceStrategy{search: s},
@@ -86,7 +87,7 @@ func TestAvailableModes_MinimalRegistry(t *testing.T) {
 		keys[m.Key] = true
 	}
 	// Base modes MUST always be present
-	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "legacy", "prefix_inference", "combined"}
+	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "legacy", "prefix_inference", "cache", "combined"}
 	for _, want := range baseModes {
 		if !keys[want] {
 			t.Errorf("AvailableModes() missing base mode %q; got %v", want, keys)

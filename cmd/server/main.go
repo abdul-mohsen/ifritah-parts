@@ -150,6 +150,16 @@ func main() {
 		log.Printf("✓ Prefix-inference strategy wired (Postgres migration 000011)")
 	}
 
+	// Phase 2 (2026-08-17): persistent OEM resolution cache. Requires
+	// Postgres migration 000012 (oem_resolution_cache). Every successful
+	// resolution — from TecDoc, dealer_lookup, partsouq, prefix inference,
+	// or any future source — writes here. Second-visit reads hit in <100 ms.
+	if pg != nil {
+		oemCache := service.NewOEMCache(pg)
+		smartSearch.SetOEMCache(oemCache)
+		log.Printf("✓ Persistent OEM cache wired (Postgres migration 000012)")
+	}
+
 	// When MySQL is connected, wire the full TecDoc reader into SmartSearch.
 	// The SmartSearch cascade uses TecDoc as an early-hit strategy for OEM
 	// searches that miss the local Postgres cache — the source-of-truth for

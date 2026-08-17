@@ -160,7 +160,7 @@ func TestModes_ReturnsBaseSet(t *testing.T) {
 		}
 		seen[m.Key] = true
 	}
-	for _, want := range []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "legacy", "prefix_inference", "combined"} {
+	for _, want := range []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "legacy", "prefix_inference", "cache", "combined"} {
 		if !seen[want] {
 			t.Errorf("/api/search/modes missing base mode %q", want)
 		}

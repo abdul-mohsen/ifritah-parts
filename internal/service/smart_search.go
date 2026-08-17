@@ -33,6 +33,7 @@ type SmartSearch struct {
 	tecDocVehicle    *TecDocVehicle
 	dependency       *DependencyClassifier
 	prefixInference  *PrefixInference
+	oemCache         *OEMCache
 	offline          bool
 	queries          *store.Queries
 	// Circuit breaker state — per-instance to avoid cross-test contamination.
@@ -90,6 +91,12 @@ func (s *SmartSearch) SetTecDocVehicle(v *TecDocVehicle) { s.tecDocVehicle = v }
 // OEMs missing from TecDoc still return a deterministic result (e.g.
 // "82460-2T010 → Front Power Window Motor for Kia Optima TF (2010-2015)").
 func (s *SmartSearch) SetPrefixInference(p *PrefixInference) { s.prefixInference = p }
+
+// SetOEMCache attaches the Phase-2 persistent Postgres OEM resolution
+// cache. When set, CacheStrategy is included in the search fan-out at
+// top priority so previously-resolved OEMs return in <100 ms and every
+// successful strategy write-back caches its result for future queries.
+func (s *SmartSearch) SetOEMCache(c *OEMCache) { s.oemCache = c }
 
 // SmartResult is an enhanced part result with confidence and cross-ref data.
 type SmartResult struct {
