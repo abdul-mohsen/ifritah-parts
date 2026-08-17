@@ -1,13 +1,15 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import type { SmartSearchResponse, SmartResult, OEMSearchResponse, PartDetailViewModel, OEMReference } from '../types';
-import { getPartDetail, smartSearch, searchOEM } from '../api/client';
+import type { SmartResult, OEMSearchResponse, PartDetailViewModel, OEMReference } from '../types';
+import { getPartDetail, searchOEM } from '../api/client';
+import { useSearchStream } from '../hooks/useSearchStream';
 import PartDetailModal from './PartDetailModal';
 import SupersessionChain from './SupersessionChain';
 import { SearchModeSelector, StrategyBadge, StrategiesSummaryBar } from './SearchModeSelector';
 import { SpecificationTable } from './SpecificationTable';
 import { CompatibilityChips } from './CompatibilityChips';
 import { DocumentsList } from './DocumentsList';
+import { SearchProgress } from './SearchProgress';
 import { createPartDetailViewModel, createPartDetailViewModelFromResponse } from '../utils/partDetail';
 
 const driverColors: Record<string, string> = {
@@ -59,45 +61,6 @@ function dedupeOEMResults(results: OEMReference[]): OEMReference[] {
       seen.set(key, result);
     }
   }
-  return Array.from(seen.values());
-}
-
-function dedupeSmartResults(results: SmartResult[]): SmartResult[] {
-  const seen = new Map<string, SmartResult>();
-
-  for (const result of results) {
-    const key = result.legacyArticleId > 0
-      ? `id:${result.legacyArticleId}`
-      : `${result.articleNumber}|${result.brand || result.brandName || ''}|${result.description}`;
-    const existing = seen.get(key);
-
-    if (!existing) {
-      seen.set(key, {
-        ...result,
-        oemNumbers: result.oemNumbers ? [...result.oemNumbers] : undefined,
-        substitutions: result.substitutions ? [...result.substitutions] : undefined,
-        aftermarketAlternatives: result.aftermarketAlternatives ? [...result.aftermarketAlternatives] : undefined,
-        compatibility: result.compatibility ? [...result.compatibility] : undefined,
-      });
-      continue;
-    }
-
-    existing.confidence = Math.max(existing.confidence, result.confidence);
-    existing.confidenceNote = existing.confidenceNote || result.confidenceNote;
-
-    if (result.oemNumbers?.length) {
-      const oemMap = new Map((existing.oemNumbers ?? []).map((item) => [item.rawNumber, item]));
-      for (const oem of result.oemNumbers) {
-        oemMap.set(oem.rawNumber, oem);
-      }
-      existing.oemNumbers = Array.from(oemMap.values());
-    }
-
-    if (result.compatibility?.length) {
-      existing.compatibility = Array.from(new Set([...(existing.compatibility ?? []), ...result.compatibility]));
-    }
-  }
-
   return Array.from(seen.values());
 }
 
@@ -154,9 +117,11 @@ export default function OemSearch() {
     }
     setSearchParams(next, { replace: true });
   };
-  const [loading, setLoading] = useState(false);
+
+  // Search stream hook — replaces the previous useState(loading) + smartSearch() calls.
+  const { loading, steps, result, error: streamError, search: startSearch } = useSearchStream();
+
   const [error, setError] = useState('');
-  const [result, setResult] = useState<SmartSearchResponse | null>(null);
   const [oemResult, setOemResult] = useState<OEMSearchResponse | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<PartDetailViewModel | null>(null);
@@ -248,43 +213,32 @@ export default function OemSearch() {
     const trimmed = query.trim();
     if (!trimmed) return;
     setError('');
-    setLoading(true);
     setExpandedId(null);
     setOemResult(null);
-    try {
-      // Fire both queries in parallel when it looks like an OEM number
-      const isOem = isLikelyOEM(trimmed);
-      const searchOptions = {
-        limit: 50,
-        ...(hasVehicleContext ? { linkageTargetId: vehicleId } : {}),
-        ...(vehicleCC > 0 ? { vehicleCC } : {}),
-        ...(fuelType ? { fuelType } : {}),
-      };
-      const [smartData, oemData] = await Promise.all([
-        smartSearch(trimmed, {
-          ...searchOptions,
-          mode: searchMode || undefined,
-          enrichmentLevel: 'basic',
-        }),
-        isOem ? searchOEM(trimmed, 20) : Promise.resolve(null),
-      ]);
-      if (smartData.results == null) smartData.results = [];
-      setResult({
-        ...smartData,
-        total: dedupeSmartResults(smartData.results).length,
-        results: dedupeSmartResults(smartData.results),
-      });
-      setOemResult(oemData
-        ? {
+
+    // Fire streaming search + OEM lookup in parallel.
+    const isOem = isLikelyOEM(trimmed);
+    startSearch({
+      q: trimmed,
+      limit: 50,
+      ...(hasVehicleContext ? { linkageTargetId: vehicleId } : {}),
+      ...(vehicleCC > 0 ? { vehicleCC } : {}),
+      ...(fuelType ? { fuelType } : {}),
+      mode: searchMode || undefined,
+      enrichmentLevel: 'basic',
+    });
+
+    if (isOem) {
+      searchOEM(trimmed, 20)
+        .then(oemData => {
+          if (!oemData) return;
+          setOemResult({
             ...oemData,
             total: dedupeOEMResults(oemData.results).length,
             results: dedupeOEMResults(oemData.results),
-          }
-        : null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Search failed');
-    } finally {
-      setLoading(false);
+          });
+        })
+        .catch(() => {});
     }
   }
 
@@ -342,9 +296,12 @@ export default function OemSearch() {
         </form>
       </section>
 
-      {error && (
+      {/* Live search progress — shown while streaming */}
+      <SearchProgress steps={steps} loading={loading} />
+
+      {(error || streamError) && (
         <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-red-700">
-          {error}
+          {error || streamError}
         </div>
       )}
 

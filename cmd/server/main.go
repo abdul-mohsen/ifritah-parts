@@ -16,6 +16,7 @@ import (
 
 	"parts-engine/internal/config"
 	"parts-engine/internal/db"
+	dbg "parts-engine/internal/debug"
 	"parts-engine/internal/enrich"
 	"parts-engine/internal/handler"
 	"parts-engine/internal/middleware"
@@ -40,6 +41,17 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// Debug logger — tees every log.Printf into a ring buffer + SSE broadcast.
+	// Only active when DEBUG_LOGS=1. In production this is nil and the normal
+	// log.SetOutput(os.Stderr) default applies.
+	var debugLogger *dbg.Logger
+	if cfg.DebugLogs {
+		debugLogger = dbg.New(os.Stderr, 500)
+		log.SetOutput(debugLogger)
+		log.SetFlags(log.LstdFlags)
+		log.Println("⚡ DEBUG_LOGS=1 — /api/debug/logs SSE endpoint is active")
+	}
 
 	pg := db.NewPostgres(cfg)
 	var dataDBAvailable bool
@@ -234,7 +246,16 @@ func main() {
 		// Applied only to /api/search (not /search/modes which is cheap).
 		searchRL := middleware.NewRateLimiter(100, 20)
 		api.GET("/search", searchRL.Middleware(), searchH.Search)
+		api.GET("/search/stream", searchRL.Middleware(), searchH.SearchStream)
 		api.GET("/search/modes", searchH.Modes)
+
+		// /api/debug/logs — SSE log stream. Only registered when DEBUG_LOGS=1.
+		// No auth gate: in dev you want logs immediately without setup friction.
+		if cfg.DebugLogs && debugLogger != nil {
+			debugH := handler.NewDebugHandler(debugLogger)
+			api.GET("/debug/logs", debugH.LogStream)
+			log.Printf("✓ Debug log stream active at GET /api/debug/logs")
+		}
 
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)
