@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"parts-engine/internal/model"
 	"parts-engine/internal/store"
@@ -83,9 +84,7 @@ func (s *PartsLookup) FindByArticleNumber(articleNumber string, linkageTargetId,
 		return nil, fmt.Errorf("find article number: %w", err)
 	}
 
-	// S2-T2 (BUG-4): if exact match finds nothing, try the normalized form
-	// (dashes/spaces stripped). hk_parts_cache may store article_number without
-	// punctuation (e.g. "2630035505") even when the OEM is queried as "26300-35505".
+	// S2-T2 (BUG-4): if exact match finds nothing, try the normalized form.
 	if len(rows) == 0 {
 		normalized := NormalizeOEM(articleNumber)
 		if normalized != strings.ToLower(articleNumber) {
@@ -95,6 +94,41 @@ func (s *PartsLookup) FindByArticleNumber(articleNumber string, linkageTargetId,
 			})
 			if err2 == nil {
 				rows = rows2
+			}
+		}
+	}
+
+	// BUG-6 stem lookup: for a 5-digit all-numeric stem (e.g. "97133"), also
+	// search by OEM prefix so that "97133" finds "97133-D3000" etc.
+	if len(rows) == 0 {
+		trimmed := strings.TrimSpace(articleNumber)
+		isNumericStem := len(trimmed) == 5
+		if isNumericStem {
+			for _, c := range trimmed {
+				if c < '0' || c > '9' {
+					isNumericStem = false
+					break
+				}
+			}
+		}
+		if isNumericStem {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			prefixRows, prefixErr := s.queries.SearchOEMPrefix(ctx, store.SearchOEMPrefixParams{
+				Normalized: strings.ToLower(trimmed) + "%",
+				Limit:      int32(limit),
+			})
+			if prefixErr == nil {
+				for _, pr := range prefixRows {
+					if pr.LegacyArticleID > 0 {
+						rows = append(rows, store.SearchByArticleNumberRow{
+							LegacyArticleID:    pr.LegacyArticleID,
+							ArticleNumber:      pr.ArticleNumber,
+							GenericArticleDesc: pr.Description,
+							BrandName:          pr.BrandName,
+						})
+					}
+				}
 			}
 		}
 	}
