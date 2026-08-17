@@ -73,10 +73,24 @@ export function SearchModeSelector({ value, onChange }: Props) {
   );
 }
 
+const STRATEGY_DESCRIPTIONS: Record<string, string> = {
+  exact_oem:        'Found by exact OEM number match',
+  cross_reference:  'Found via TecDoc cross-reference table (30M rows)',
+  vehicle_fitment:  'Directly linked to your vehicle in the parts database',
+  supersession:     'Found via OEM replacement chain',
+  cross_brand:      'Found via Hyundai ↔ Kia platform sharing',
+  spec_match:       'Matched by physical specifications — interchangeable by dimensions',
+  assembly_context: 'Found as a compatible sub-part for a parent component',
+  // S8-T6: distinctive description for vin_assembly
+  vin_assembly:     'Found because its specifications match your vehicle\'s engine and chassis — not just database links',
+  combined:         'Best result from Smart Search (all strategies combined)',
+};
+
 export function StrategyBadge({ strategy }: { strategy?: string }) {
   if (!strategy) return null;
   const color = STRATEGY_COLORS[strategy] ?? '#9ca3af';
   const label = strategy.replace(/_/g, ' ');
+  const description = STRATEGY_DESCRIPTIONS[strategy] ?? `Returned by ${label} strategy`;
   return (
     <span
       style={{
@@ -90,7 +104,7 @@ export function StrategyBadge({ strategy }: { strategy?: string }) {
         border: `1px solid ${color}55`,
         whiteSpace: 'nowrap',
       }}
-      title={`Returned by ${label} strategy`}
+      title={description}
     >
       {label}
     </span>

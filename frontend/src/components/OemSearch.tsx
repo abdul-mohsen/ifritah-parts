@@ -589,6 +589,15 @@ function ResultCard({
         </div>
       )}
 
+      {/* S8-T6: vin_assembly distinctive note */}
+      {r.sourceStrategy === 'vin_assembly' && (
+        <div className="px-4 pb-2">
+          <p className="text-xs text-emerald-600 italic">
+            Matched via vehicle spec — verify fitment for your exact variant before ordering.
+          </p>
+        </div>
+      )}
+
       {/* Substitutions (OEM replacements) */}
       {r.substitutions && r.substitutions.length > 0 && (
         <div className="border-t border-gray-100 px-4 py-3">

@@ -88,6 +88,8 @@ export default function VinInput() {
       model: result?.nhtsaRaw?.model || catalogVehicle.model,
       sourceType: 'VIN',
       sourceQuery: vin.toUpperCase(),
+      // S8-T5: default to vin_assembly when vehicle context is confirmed
+      mode: 'vin_assembly',
     });
     if (catalogVehicle.capacityCC) params.set('vehicleCC', String(catalogVehicle.capacityCC));
     if (catalogVehicle.fuelType) params.set('fuelType', catalogVehicle.fuelType);
@@ -279,10 +281,32 @@ export default function VinInput() {
           {catalogVehicle && (
             <section data-testid="vin-part-search" className="rounded-[28px] border border-white/10 bg-white/95 p-5 text-slate-900 shadow-2xl shadow-slate-950/20">
               <div className="mb-4">
-                <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Confirmed vehicle search</div>
-                <h3 className="mt-1 text-lg font-semibold text-slate-950">Find a part for this vehicle</h3>
+                <div className="flex items-center gap-2 mb-1">
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Confirmed vehicle search</div>
+                  {/* S8-T6: vin_assembly mode badge */}
+                  <span style={{
+                    display: 'inline-block',
+                    padding: '1px 7px',
+                    borderRadius: '9999px',
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    backgroundColor: '#10b98122',
+                    color: '#10b981',
+                    border: '1px solid #10b98155',
+                    whiteSpace: 'nowrap',
+                  }} title="Results matched via vehicle engine and chassis specifications">
+                    vehicle spec match
+                  </span>
+                </div>
+                <h3 className="text-lg font-semibold text-slate-950">Find a part for this vehicle</h3>
                 <p className="mt-1 text-sm text-slate-600">
-                  Search stays constrained to {catalogVehicle.description || `${catalogVehicle.make} ${catalogVehicle.model}`}.
+                  Results are matched to{' '}
+                  <span className="font-medium">
+                    {catalogVehicle.capacityCC ? `${(catalogVehicle.capacityCC / 1000).toFixed(1)}L ` : ''}
+                    {catalogVehicle.fuelType ? `${catalogVehicle.fuelType} ` : ''}
+                    {catalogVehicle.description || `${catalogVehicle.make} ${catalogVehicle.model}`}
+                  </span>{' '}
+                  by engine and chassis specs — finds parts even when not explicitly linked in the parts database.
                 </p>
               </div>
               <form onSubmit={openVehiclePartSearch} className="flex flex-col gap-3 sm:flex-row">
@@ -290,7 +314,7 @@ export default function VinInput() {
                   aria-label="Part name for confirmed vehicle"
                   value={partSearchQuery}
                   onChange={(event) => setPartSearchQuery(event.target.value)}
-                  placeholder="e.g. cabin air filter or oil filter"
+                  placeholder="e.g. spark plug, oil filter, timing belt"
                   className="min-w-0 flex-1 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-950 outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
                 />
                 <button
@@ -298,7 +322,7 @@ export default function VinInput() {
                   disabled={!partSearchQuery.trim()}
                   className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  Search this vehicle
+                  Search by vehicle spec
                 </button>
               </form>
             </section>
