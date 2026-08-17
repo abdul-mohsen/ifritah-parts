@@ -108,6 +108,7 @@ func (s *SmartSearch) AvailableModes() []SearchMode {
 		{Key: "cross_brand", Name: "Cross Brand", Description: "Hyundai ↔ Kia platform equivalents — parts that fit both brands"},
 		{Key: "owned_catalog", Name: "Owned Catalog", Description: "Direct lookup against the owned hk_parts_cache — fast, exact article-number match"},
 		{Key: "keyword_gated", Name: "Keyword (Gated)", Description: "TecDoc full-text search filtered by category so 'oil filter' cannot return 'strut mounting'"},
+		{Key: "legacy", Name: "Legacy Cascade", Description: "The original pre-Smart-Search cascade: Postgres index → TecDoc → suffix strip → prefix match → online partsouq → dealer scrape → supersession. Slower but the widest net."},
 		{Key: "combined", Name: "Smart Search", Description: "Automatically runs all strategies in parallel and merges the best results"},
 	}
 	// Conditionally add modes that require TecDoc services.
@@ -141,6 +142,8 @@ func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 		return &OwnedCatalogStrategy{search: s}
 	case "keyword_gated":
 		return &KeywordGatedStrategy{search: s}
+	case "legacy":
+		return &LegacyCascadeStrategy{search: s}
 	case "spec_match", "assembly_context", "vin_assembly":
 		if s.tecDocSpecs == nil {
 			return nil
@@ -176,6 +179,7 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 	}
 
 	strategies := []SearchStrategy{
+		&LegacyCascadeStrategy{search: s},
 		&ExactOEMStrategy{search: s},
 		&CrossReferenceStrategy{search: s},
 		&VehicleFitmentStrategy{search: s},
@@ -559,6 +563,14 @@ func (st *KeywordGatedStrategy) Search(ctx context.Context, req StrategyRequest)
 	if req.Query == "" || st.search.tecdoc == nil {
 		return nil, nil
 	}
+	// SKIP keyword search for OEM-shaped queries (BUG: real OEMs like "82460-2T010"
+	// match irrelevant articles by digit-substring — "82460" → "pressure hose" etc.
+	// Keyword search is only sensible for free-text queries like "oil filter").
+	// Detect: if the query looks like an OEM number OR the whole query is digits+dashes,
+	// bail out and return nothing.
+	if looksLikeOEMNumber(req.Query) || isMostlyDigits(req.Query) {
+		return nil, nil
+	}
 	tdRefs, err := st.search.tecdoc.SearchByKeyword(req.Query, req.Limit)
 	if err != nil {
 		return nil, err
@@ -590,4 +602,64 @@ func (st *KeywordGatedStrategy) Search(ctx context.Context, req StrategyRequest)
 		})
 	}
 	return results, nil
+}
+
+
+// isMostlyDigits returns true when 70%+ of the input characters are digits.
+// Used as a guard on keyword search to prevent OEM-shaped queries (which are
+// mostly digits) from being interpreted as text keywords.
+func isMostlyDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	digits := 0
+	total := 0
+	for _, r := range s {
+		if r == ' ' || r == '-' || r == '/' || r == '.' {
+			continue
+		}
+		total++
+		if r >= '0' && r <= '9' {
+			digits++
+		}
+	}
+	if total == 0 {
+		return false
+	}
+	return float64(digits)/float64(total) >= 0.7
+}
+
+// LegacyCascadeStrategy wraps the pre-strategy searchDispatch cascade
+// (Postgres oem_search_index -> TecDoc SearchByOEM -> suffix strip -> prefix
+// match -> PartsOuq online lookup -> dealer_lookup scrape -> supersession).
+//
+// This is the strategy that found "82460-2T010 = FRONT POWER WINDOW MOTOR
+// ASSEMBLY" via dealer_lookup while every mono-strategy missed it. Including
+// it in searchCombined restores parity with the no-mode ("legacy") cascade
+// so Smart Search never returns strictly less than the default path.
+//
+// The dispatch itself has online steps (partsouq/dealer scrape) that can be
+// slow, so combined-mode's 3s ctx already bounds it. When those steps time
+// out, the cheap Postgres+TecDoc paths at the top of the cascade still return
+// promptly. Priority 0.95 (just under exact_oem) so its results outrank
+// keyword_gated and cross-brand paths.
+type LegacyCascadeStrategy struct{ search *SmartSearch }
+
+func (st *LegacyCascadeStrategy) Name() string            { return "legacy" }
+func (st *LegacyCascadeStrategy) ConfidenceBase() float64 { return 0.70 }
+func (st *LegacyCascadeStrategy) Priority() float64       { return 0.95 }
+func (st *LegacyCascadeStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
+	if req.Query == "" && req.LinkageTargetId == 0 {
+		return nil, nil
+	}
+	resp, err := st.search.searchDispatch(req.Query, req.LinkageTargetId, req.VehicleCC, req.FuelType, req.Category, 1, req.Limit)
+	if err != nil || resp == nil {
+		return nil, err
+	}
+	for i := range resp.Results {
+		if resp.Results[i].SourceStrategy == "" {
+			resp.Results[i].SourceStrategy = "legacy"
+		}
+	}
+	return resp.Results, nil
 }
