@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"os"
@@ -196,13 +197,17 @@ func main() {
 	// internalAuth guards /api/internal/* routes with a static bearer token.
 	// Set INTERNAL_API_KEY in the environment. When the key is empty the
 	// middleware disables all internal routes entirely (503).
+	//
+	// Token comparison uses crypto/subtle.ConstantTimeCompare so per-byte
+	// timing does not leak the secret to an attacker measuring latency.
+	expectedAuth := []byte("Bearer " + cfg.InternalAPIKey)
 	internalAuth := func(c *gin.Context) {
 		if cfg.InternalAPIKey == "" {
 			c.AbortWithStatusJSON(503, gin.H{"error": "internal API not configured"})
 			return
 		}
-		auth := c.GetHeader("Authorization")
-		if auth != "Bearer "+cfg.InternalAPIKey {
+		provided := []byte(c.GetHeader("Authorization"))
+		if subtle.ConstantTimeCompare(provided, expectedAuth) != 1 {
 			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
 			return
 		}

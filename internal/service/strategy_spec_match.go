@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"parts-engine/internal/model"
@@ -111,15 +112,15 @@ func (st *SpecMatchStrategy) resolveSeedSpecs(ctx context.Context, req StrategyR
 
 // isSafetyCritical returns true when the spec set includes hard constraints
 // where a wrong value causes engine damage or physical incompatibility.
+// isSafetyCritical returns true when a spec set contains one of the hard-
+// constraint fields where a wrong value causes engine damage or physical
+// incompatibility (docs/specs/domain-knowledge.md §1.4).
+//
+// Uses the same substring match as safetyRank so a single change to the
+// keyword list is enough to keep both paths consistent.
 func isSafetyCritical(specs []model.Specification) bool {
-	critical := map[string]bool{
-		"teeth_count":         true, // timing belt
-		"inner_spline_count":  true, // CV axle
-		"teeth number":        true,
-		"number of teeth":     true,
-	}
 	for _, sp := range specs {
-		if critical[normalizeSpecName(sp.Name)] {
+		if safetyRank(sp.Name) == 0 {
 			return true
 		}
 	}
@@ -158,6 +159,12 @@ type SpecMatchResult struct {
 //
 // Only specs with CriteriaType == "1" (mandatory in TecDoc) are used as hard
 // filters. Soft specs are not used as SQL filters.
+//
+// Safety-critical constraints (timing belt teeth_count, CV axle spline_count)
+// are moved to the FRONT of the mandatory list so they become the PRIMARY SQL
+// filter. Wrong teeth count on a timing belt = engine damage; wrong spline
+// count on a CV axle = physical incompatibility. Ordering matters because
+// the SQL query uses only the first mandatory spec as its WHERE filter.
 func (s *TecDocSpecifications) FindBySpecMatch(ctx context.Context, seedId int, seedSpecs []model.Specification, limit int) ([]SpecMatchResult, error) {
 	if s.repo == nil {
 		return nil, fmt.Errorf("database not connected")
@@ -191,8 +198,18 @@ func (s *TecDocSpecifications) FindBySpecMatch(ctx context.Context, seedId int, 
 		return nil, nil
 	}
 
-	// Use the most specific (first) mandatory spec as the SQL filter.
-	// Callers should pass the hardest constraint first (e.g. teeth_count for timing belts).
+	// Re-order so safety-critical specs are used first as the SQL filter.
+	// docs/specs/domain-knowledge.md §1.4 hard-constraint categories:
+	//   timing belt:  teeth_count       — wrong value = engine damage
+	//   CV axle:      inner_spline_count — wrong value = physical incompatibility
+	//   spark plug:   thread_diameter, thread_reach, seat_type
+	//   brake rotor:  outer_diameter_mm, vented
+	//   O2 sensor:    thread_size, wire_count, signal_type
+	//   oil filter:   thread_size, bypass_pressure
+	sort.SliceStable(mandatory, func(i, j int) bool {
+		return safetyRank(mandatory[i].name) < safetyRank(mandatory[j].name)
+	})
+
 	primary := mandatory[0]
 
 	sqlspecRepo, ok := s.repo.(*sqlSpecificationRepo)
@@ -256,5 +273,84 @@ func (s *TecDocSpecifications) FindBySpecMatch(ctx context.Context, seedId int, 
 	if rowErr := rows.Err(); rowErr != nil {
 		return nil, fmt.Errorf("FindBySpecMatch rows: %w", rowErr)
 	}
+
+	// Post-filter: enforce ALL remaining mandatory constraints in memory.
+	// This turns the "first-spec only" SQL filter into an actual multi-spec
+	// intersection so a timing belt with matching thread but WRONG teeth count
+	// is still rejected. Requires a second query per candidate but the
+	// candidate set is already bounded by `limit`, so this is at most
+	// `limit * (len(mandatory) - 1)` cheap indexed lookups.
+	if len(mandatory) > 1 && len(out) > 0 {
+		filtered := make([]SpecMatchResult, 0, len(out))
+		for _, r := range out {
+			ok := true
+			for _, cons := range mandatory[1:] {
+				if !s.articleHasSpec(ctx, sqlspecRepo, r.LegacyArticleId, cons.name, cons.value) {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				filtered = append(filtered, r)
+			}
+		}
+		out = filtered
+	}
 	return out, nil
+}
+
+// articleHasSpec checks whether the given article has a specific
+// criteriaDescription+rawValue in articlecriteria. Used to enforce multi-spec
+// mandatory intersections after the primary SQL filter.
+func (s *TecDocSpecifications) articleHasSpec(ctx context.Context, repo *sqlSpecificationRepo, articleId int, name, value string) bool {
+	const q = `
+		SELECT 1
+		FROM articlecriteria
+		WHERE legacyArticleId = ?
+		  AND criteriaDescription = ?
+		  AND rawValue = ?
+		LIMIT 1`
+	rows, err := logQueryCtx(repo.db, ctx, "TecDocSpecifications.articleHasSpec", q, articleId, name, value)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	return rows.Next()
+}
+
+// safetyRank orders spec names so safety-critical hard constraints sort first.
+// Lower rank = filtered earlier in SQL. See domain-knowledge.md §1.4.
+func safetyRank(specName string) int {
+	n := strings.ToLower(strings.TrimSpace(specName))
+	// Level 0 — critical: wrong value = engine damage or physical incompatibility
+	criticalKeywords := []string{
+		"teeth", "spline count", "spline", "number of teeth", "tooth count",
+		"pitch", "belt teeth",
+	}
+	for _, kw := range criticalKeywords {
+		if strings.Contains(n, kw) {
+			return 0
+		}
+	}
+	// Level 1 — hard fit: thread, bore, diameter (physical fit)
+	hardFitKeywords := []string{
+		"thread diameter", "thread size", "thread reach", "thread pitch",
+		"outer diameter", "bore diameter", "inner diameter", "seat type",
+	}
+	for _, kw := range hardFitKeywords {
+		if strings.Contains(n, kw) {
+			return 1
+		}
+	}
+	// Level 2 — electrical/signal (o2 sensor connector, wire count)
+	electricalKeywords := []string{
+		"wire count", "wire number", "signal type", "connector", "connection type",
+	}
+	for _, kw := range electricalKeywords {
+		if strings.Contains(n, kw) {
+			return 2
+		}
+	}
+	// Level 3 — everything else
+	return 3
 }

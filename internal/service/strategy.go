@@ -65,7 +65,7 @@ func (s *SmartSearch) searchByMode(query string, linkageTargetId, vehicleCC int,
 		return s.searchDispatch(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	results, err := strategy.Search(ctx, req)

@@ -20,6 +20,15 @@ func NewSearchHandler(search *service.SmartSearch) *SearchHandler {
 	return &SearchHandler{search: search}
 }
 
+// validEnrichmentLevels is the set of allowed enrichmentLevel query values.
+// Any value outside this set returns 400 rather than silently falling back.
+var validEnrichmentLevels = map[string]bool{
+	"":      true, // empty → default (basic)
+	"none":  true,
+	"basic": true,
+	"full":  true,
+}
+
 // Search handles GET /api/search?q=&linkageTargetId=&vehicleCC=&fuelType=&category=&page=&limit=&mode=&enrichmentLevel=
 func (h *SearchHandler) Search(c *gin.Context) {
 	start := time.Now()
@@ -42,6 +51,25 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		return
 	}
 
+	// Input validation: 400 on invalid mode / enrichmentLevel rather than silent fallback.
+	if mode != "" && !h.isValidMode(mode) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":       "unknown mode",
+			"mode":        mode,
+			"validModes":  h.validModeKeys(),
+			"hint":        "Call GET /api/search/modes for the current list, or omit the mode param to use the default cascade",
+		})
+		return
+	}
+	if !validEnrichmentLevels[enrichmentLevel] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":            "unknown enrichmentLevel",
+			"enrichmentLevel":  enrichmentLevel,
+			"validValues":      []string{"none", "basic", "full"},
+		})
+		return
+	}
+
 	result, err := h.search.SearchWithOptions(q, linkageTargetId, vehicleCC, fuelType, category, page, limit, mode, enrichmentLevel)
 	if err != nil {
 		log.Printf("[SearchHandler] <<< ERROR after %v: %v", time.Since(start), err)
@@ -53,9 +81,40 @@ func (h *SearchHandler) Search(c *gin.Context) {
 		return
 	}
 
+	// X-Search-Strategy response header — tells the caller which strategy produced
+	// the result without having to parse the JSON body (useful for logs / observability).
+	if result.SearchStrategy != "" {
+		c.Header("X-Search-Strategy", result.SearchStrategy)
+	}
+	if result.Mode != "" {
+		c.Header("X-Search-Mode", result.Mode)
+	}
+
 	log.Printf("[SearchHandler] <<< OK strategy=%q mode=%q results=%d elapsed=%v",
 		result.SearchStrategy, result.Mode, result.Total, time.Since(start))
 	c.JSON(http.StatusOK, result)
+}
+
+// isValidMode returns true when the requested mode is registered in
+// SmartSearch.AvailableModes(). The set is dynamic — modes only appear when
+// their backing TecDoc services are wired up, so we consult the live registry
+// rather than a hardcoded list.
+func (h *SearchHandler) isValidMode(mode string) bool {
+	for _, m := range h.search.AvailableModes() {
+		if m.Key == mode {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *SearchHandler) validModeKeys() []string {
+	modes := h.search.AvailableModes()
+	keys := make([]string, 0, len(modes))
+	for _, m := range modes {
+		keys = append(keys, m.Key)
+	}
+	return keys
 }
 
 // Modes handles GET /api/search/modes — returns all available search strategy descriptors.

@@ -54,23 +54,23 @@ func NewRecallsHandler(svc *service.RecallsClient) *RecallsHandler {
 // (rate-limited, network error, or empty results) so callers can treat
 // recalls as best-effort without treating the absence as a server error.
 func (h *RecallsHandler) ByVIN(c *gin.Context) {
-	make := c.Query("make")
+	vehicleMake := c.Query("make")
 	model := c.Query("model")
 	yearStr := c.Query("year")
 
-	if make == "" || model == "" || yearStr == "" {
+	if vehicleMake == "" || model == "" || yearStr == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "make, model, year query params required"})
 		return
 	}
 
 	year, _ := strconv.Atoi(yearStr)
 
-	recalls, err := h.svc.GetRecalls(make, model, year)
+	recalls, err := h.svc.GetRecalls(vehicleMake, model, year)
 	if err != nil {
 		// NHTSA API failures are non-fatal: return 200 with empty list and a warning.
 		// Callers (QA gate, frontend) treat empty recalls gracefully.
 		c.JSON(http.StatusOK, gin.H{
-			"make":    make,
+			"make":    vehicleMake,
 			"model":   model,
 			"year":    year,
 			"recalls": []interface{}{},
@@ -81,7 +81,7 @@ func (h *RecallsHandler) ByVIN(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"make":    make,
+		"make":    vehicleMake,
 		"model":   model,
 		"year":    year,
 		"recalls": recalls,

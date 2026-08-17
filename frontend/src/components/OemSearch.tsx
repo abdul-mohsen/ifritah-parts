@@ -112,7 +112,7 @@ function deriveModelName(model: string | undefined, description: string | undefi
 
 export default function OemSearch() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const vehicleId = Number(searchParams.get('vehicleId') || '0');
   const vehicleCC = Number(searchParams.get('vehicleCC') || '0');
   const fuelType = searchParams.get('fuelType') || '';
@@ -122,7 +122,37 @@ export default function OemSearch() {
   const sourceQuery = searchParams.get('sourceQuery') || '';
   const hasVehicleContext = vehicleId > 0;
   const [query, setQuery] = useState(() => searchParams.get('q') || '');
-  const [searchMode, setSearchMode] = useState('');
+  // Mode persistence: URL `?mode=` wins > localStorage > empty.
+  // On change, update both so the user's choice deep-links and survives reloads.
+  const [searchMode, setSearchModeState] = useState(() => {
+    const urlMode = searchParams.get('mode') || '';
+    if (urlMode) return urlMode;
+    try {
+      return localStorage.getItem('ifritah.searchMode') || '';
+    } catch {
+      return '';
+    }
+  });
+  const setSearchMode = (mode: string) => {
+    setSearchModeState(mode);
+    try {
+      if (mode) {
+        localStorage.setItem('ifritah.searchMode', mode);
+      } else {
+        localStorage.removeItem('ifritah.searchMode');
+      }
+    } catch {
+      // localStorage may be unavailable (private-mode browsers, SSR). Silent fallback.
+    }
+    // Reflect selection in URL so the choice can be shared / bookmarked.
+    const next = new URLSearchParams(searchParams);
+    if (mode) {
+      next.set('mode', mode);
+    } else {
+      next.delete('mode');
+    }
+    setSearchParams(next, { replace: true });
+  };
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState<SmartSearchResponse | null>(null);
