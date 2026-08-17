@@ -49,10 +49,11 @@ func NewRecallsHandler(svc *service.RecallsClient) *RecallsHandler {
 	return &RecallsHandler{svc: svc}
 }
 
-// ByVIN handles GET /api/recalls/:vin.
+// ByVIN handles GET /api/recalls?make=&model=&year=.
+// Returns 200 with an empty recalls list when the NHTSA API is unavailable
+// (rate-limited, network error, or empty results) so callers can treat
+// recalls as best-effort without treating the absence as a server error.
 func (h *RecallsHandler) ByVIN(c *gin.Context) {
-	// For now, require make/model/year as query params
-	// (full VIN decode integration is in the VIN handler)
 	make := c.Query("make")
 	model := c.Query("model")
 	yearStr := c.Query("year")
@@ -66,7 +67,16 @@ func (h *RecallsHandler) ByVIN(c *gin.Context) {
 
 	recalls, err := h.svc.GetRecalls(make, model, year)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// NHTSA API failures are non-fatal: return 200 with empty list and a warning.
+		// Callers (QA gate, frontend) treat empty recalls gracefully.
+		c.JSON(http.StatusOK, gin.H{
+			"make":    make,
+			"model":   model,
+			"year":    year,
+			"recalls": []interface{}{},
+			"total":   0,
+			"warning": "NHTSA recalls API unavailable: " + err.Error(),
+		})
 		return
 	}
 
