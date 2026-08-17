@@ -8,6 +8,7 @@ import CrossBrandBadge from './CrossBrandBadge';
 import RecallBanner from './RecallBanner';
 import CategoryPicker from './CategoryPicker';
 import VehicleConfigurator from './VehicleConfigurator';
+import { SearchModeSelector } from './SearchModeSelector';
 import PlatformBadge from './PlatformBadge';
 
 const VIN_RE = /^[A-HJ-NPR-Z0-9]{17}$/i;
@@ -23,6 +24,12 @@ export default function VinInput() {
   const [categoryTotal, setCategoryTotal] = useState(0);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [partSearchQuery, setPartSearchQuery] = useState('');
+  // Mode selector for vehicle-based part search. Defaults to vin_assembly
+  // (find parts by vehicle spec, not just database links).
+  const [partSearchMode, setPartSearchMode] = useState(() => {
+    try { return localStorage.getItem('ifritah.searchMode') || 'vin_assembly'; }
+    catch { return 'vin_assembly'; }
+  });
 
   const valid = VIN_RE.test(vin);
 
@@ -89,7 +96,7 @@ export default function VinInput() {
       sourceType: 'VIN',
       sourceQuery: vin.toUpperCase(),
       // S8-T5: default to vin_assembly when vehicle context is confirmed
-      mode: 'vin_assembly',
+      mode: partSearchMode || 'vin_assembly',
     });
     if (catalogVehicle.capacityCC) params.set('vehicleCC', String(catalogVehicle.capacityCC));
     if (catalogVehicle.fuelType) params.set('fuelType', catalogVehicle.fuelType);
@@ -309,21 +316,24 @@ export default function VinInput() {
                   by engine and chassis specs — finds parts even when not explicitly linked in the parts database.
                 </p>
               </div>
-              <form onSubmit={openVehiclePartSearch} className="flex flex-col gap-3 sm:flex-row">
-                <input
-                  aria-label="Part name for confirmed vehicle"
-                  value={partSearchQuery}
-                  onChange={(event) => setPartSearchQuery(event.target.value)}
-                  placeholder="e.g. spark plug, oil filter, timing belt"
-                  className="min-w-0 flex-1 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-950 outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
-                />
-                <button
-                  type="submit"
-                  disabled={!partSearchQuery.trim()}
-                  className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Search by vehicle spec
-                </button>
+              <form onSubmit={openVehiclePartSearch} className="flex flex-col gap-3">
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <input
+                    aria-label="Part name for confirmed vehicle"
+                    value={partSearchQuery}
+                    onChange={(event) => setPartSearchQuery(event.target.value)}
+                    placeholder="e.g. spark plug, oil filter, timing belt"
+                    className="min-w-0 flex-1 rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-950 outline-none transition-colors focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!partSearchQuery.trim()}
+                    className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Search by vehicle spec
+                  </button>
+                </div>
+                <SearchModeSelector value={partSearchMode} onChange={setPartSearchMode} />
               </form>
             </section>
           )}

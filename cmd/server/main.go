@@ -18,6 +18,7 @@ import (
 	"parts-engine/internal/db"
 	"parts-engine/internal/enrich"
 	"parts-engine/internal/handler"
+	"parts-engine/internal/middleware"
 	"parts-engine/internal/nhtsa"
 	"parts-engine/internal/service"
 )
@@ -229,7 +230,10 @@ func main() {
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/recalls", recallsH.ByVIN)
-		api.GET("/search", searchH.Search)
+		// Rate-limited: 100 requests/min sustained, burst 20 per client IP.
+		// Applied only to /api/search (not /search/modes which is cheap).
+		searchRL := middleware.NewRateLimiter(100, 20)
+		api.GET("/search", searchRL.Middleware(), searchH.Search)
 		api.GET("/search/modes", searchH.Modes)
 
 		api.GET("/catalog/models", catalogH.Models)

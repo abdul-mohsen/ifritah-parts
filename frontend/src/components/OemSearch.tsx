@@ -7,6 +7,7 @@ import SupersessionChain from './SupersessionChain';
 import { SearchModeSelector, StrategyBadge, StrategiesSummaryBar } from './SearchModeSelector';
 import { SpecificationTable } from './SpecificationTable';
 import { CompatibilityChips } from './CompatibilityChips';
+import { DocumentsList } from './DocumentsList';
 import { createPartDetailViewModel, createPartDetailViewModelFromResponse } from '../utils/partDetail';
 
 const driverColors: Record<string, string> = {
@@ -681,6 +682,13 @@ function ResultCard({
       {r.specifications && r.specifications.length > 0 && (
         <div className="border-t border-gray-100 px-4 py-3">
           <SpecificationTable specs={r.specifications} />
+        </div>
+      )}
+
+      {/* Documents and manuals (S3 enrichment, T-4C.4) */}
+      {r.documents && r.documents.length > 0 && (
+        <div className="border-t border-gray-100 px-4 py-3">
+          <DocumentsList documents={r.documents} />
         </div>
       )}
 

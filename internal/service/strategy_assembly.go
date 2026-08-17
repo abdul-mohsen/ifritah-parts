@@ -154,6 +154,9 @@ func identifyComponentType(specs []model.Specification, category string) string 
 			return "turbocharger"
 		}
 	}
+	// Nothing matched — return "unknown" so deriveChildSpecs returns no constraints
+	// and the caller falls back to VehicleFitmentStrategy. Returning "engine" here
+	// was dead code: deriveChildSpecs("engine") has no case and returned nil silently.
 	return "unknown"
 }
 

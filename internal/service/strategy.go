@@ -70,7 +70,18 @@ func (s *SmartSearch) searchByMode(query string, linkageTargetId, vehicleCC int,
 
 	results, err := strategy.Search(ctx, req)
 	if err != nil {
-		return nil, err
+		// Match searchCombined behaviour: log and return empty results rather than
+		// surfacing a 500 to the caller. A single strategy failing should not
+		// prevent the user from seeing a graceful empty-results response.
+		log.Printf("[searchByMode] strategy=%s err=%v — returning empty results", strategy.Name(), err)
+		return &SmartSearchResponse{
+			Query:          query,
+			Results:        []SmartResult{},
+			Total:          0,
+			SearchStrategy: strategy.Name(),
+			Mode:           mode,
+			Warnings:       []string{fmt.Sprintf("%s search unavailable: %v", mode, err)},
+		}, nil
 	}
 
 	// Tag source strategy on each result
