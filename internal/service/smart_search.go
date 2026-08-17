@@ -470,6 +470,20 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 					goto buildResults
 				}
 			}
+			// Strategy 2b: Short-stem prefix search for 5-digit OEM stems like "97133".
+			// When the user types a stem without the suffix part, try it as a prefix
+			// against the full OEM index (e.g. "97133" matches "97133D3000").
+			normStem := NormalizeOEM(oemNum)
+			if len(normStem) >= 5 && len(normStem) < 8 {
+				stemRefs := s.prefixOEMSearch(normStem, limit)
+				if len(stemRefs) > 0 {
+					refs = stemRefs
+					resp.SearchStrategy = "oem_stem_match"
+					resp.Warnings = append(resp.Warnings,
+						fmt.Sprintf("Matched by OEM stem %s (full suffix not provided)", normStem))
+					goto buildResults
+				}
+			}
 		}
 
 		// Strategy 3: Try online lookup
