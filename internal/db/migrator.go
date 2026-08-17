@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -112,7 +113,11 @@ func RunMigrations(db *sql.DB, migrationsFS MigrationsFS, migrationsSubdir strin
 	}
 	rows.Close()
 
-	// List migration files.
+	// List migration files. Use path.Join to normalise the subdir + filename
+	// combination — this handles callers passing "" or "." (root of the
+	// embed.FS) as well as "db/migrations" (relative from a project-root
+	// FS). `path.Join(".", "foo.sql")` collapses to "foo.sql", which is
+	// what embed.FS requires (rooted paths without a "./" prefix).
 	entries, err := fs.ReadDir(migrationsFS, migrationsSubdir)
 	if err != nil {
 		return fmt.Errorf("migrator: read %s: %w", migrationsSubdir, err)
@@ -132,7 +137,7 @@ func RunMigrations(db *sql.DB, migrationsFS MigrationsFS, migrationsSubdir strin
 		if applied[version] {
 			continue
 		}
-		content, err := fs.ReadFile(migrationsFS, migrationsSubdir+"/"+f)
+		content, err := fs.ReadFile(migrationsFS, path.Join(migrationsSubdir, f))
 		if err != nil {
 			return fmt.Errorf("migrator: read %s: %w", f, err)
 		}
