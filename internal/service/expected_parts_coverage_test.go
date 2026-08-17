@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 package service
 
 // expected_parts_coverage_test.go

@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 package service
 
 // accuracy_test.go

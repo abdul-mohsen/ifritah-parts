@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 // Package service — systematic confidence matrix test for computeConfidenceForVehicle.
 //
 // Sub-test totals

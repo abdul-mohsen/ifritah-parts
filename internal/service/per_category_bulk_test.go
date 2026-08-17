@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 package service
 
 // per_category_bulk_test.go

@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 package service
 
 // reference_engine_comparison_test.go

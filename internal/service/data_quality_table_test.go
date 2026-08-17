@@ -406,21 +406,16 @@ func TestDecodeOEMPrefix_AllLiveAPISuccessOEMs(t *testing.T) {
 // TestDecodeOEMPrefix_SeedIDsReturnsNilForUnknownPrefixes verifies OEM numbers
 // whose prefix is not in the map return nil safely (no panic).
 func TestDecodeOEMPrefix_SeedIDsReturnsNilForUnknownPrefixes(t *testing.T) {
-	unknownPrefix := []string{
-		"18855-10080", // "188" not in map, "18" not in map → nil
-		"35310-2S000", // "353" not in map, "35" → Drivetrain / not nil
-	}
-	// 18855: check if "18" is in prefixMap — it's not, so nil
-	got := DecodeOEMPrefix("18855-10080")
-	if got != nil {
-		t.Errorf("DecodeOEMPrefix(\"18855-10080\"): expected nil (prefix 18 not in map), got %+v", got)
-	}
-	// 35310: "35" IS in map
+	// 35310: "35" IS in map (Drivetrain / CV Joint)
 	got35 := DecodeOEMPrefix("35310-2S000")
 	if got35 == nil {
 		t.Errorf("DecodeOEMPrefix(\"35310-2S000\"): expected non-nil (prefix 35 → Drivetrain)")
 	}
-	_ = unknownPrefix
+	// 18855: "188" is now in map (Ignition System) — was nil before prefix 18/188 was added
+	got18 := DecodeOEMPrefix("18855-10080")
+	if got18 == nil {
+		t.Errorf("DecodeOEMPrefix(\"18855-10080\"): expected non-nil (prefix 188 → Spark Plug & Ignition Coil)")
+	}
 }
 
 // ─── 4. ClassifyCategory — 110 cases ─────────────────────────────────────

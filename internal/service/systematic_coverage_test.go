@@ -563,18 +563,20 @@ func TestSystematic_IsHKOEM_IsNonHKOEM_Symmetry(t *testing.T) {
 // ─── 14. IsHKOEM compound-form variants ──────────────────────────────────
 
 // TestSystematic_IsHKOEM_CompoundForms verifies IsHKOEM handles common
-// real-world OEM number formatting artifacts (trailing spaces, uppercase,
-// mixed separators, padded zeros).
+// real-world OEM number formatting artifacts (leading/trailing spaces,
+// uppercase, mixed separators).
+// NOTE: IsHKOEM trims whitespace before classifying — leading AND trailing
+// spaces are normalised away, so both forms return IsHK=true for valid OEMs.
 func TestSystematic_IsHKOEM_CompoundForms(t *testing.T) {
 	for _, oem := range systematicOEMs {
 		oem := oem
-		// Leading space → first char is ' ', not digit → correctly returns false
+		// Leading space — IsHKOEM trims whitespace → valid OEM still accepted.
 		t.Run("LeadSpace_"+strings.ReplaceAll(oem, "-", "_"), func(t *testing.T) {
-			if IsHKOEM(" "+oem).IsHK {
-				t.Errorf("IsHKOEM(%q with leading space).IsHK = true, want false (space is not a digit)", oem)
+			if !IsHKOEM(" "+oem).IsHK {
+				t.Errorf("IsHKOEM(%q with leading space).IsHK = false, want true (IsHKOEM trims whitespace)", oem)
 			}
 		})
-		// Trailing space — first char is still the OEM digit → returns true
+		// Trailing space — same trim behaviour.
 		t.Run("TrailSpace_"+strings.ReplaceAll(oem, "-", "_"), func(t *testing.T) {
 			if !IsHKOEM(oem+" ").IsHK {
 				t.Errorf("IsHKOEM(%q with trailing space).IsHK = false, want true", oem)

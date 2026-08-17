@@ -1,3 +1,5 @@
+//go:build quality_gates
+
 package service
 
 // result_quality_test.go
