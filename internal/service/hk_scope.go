@@ -138,3 +138,38 @@ func IsHKOEM(rawOEM string) HKScopeResult {
 		Reason: "Matches Hyundai/Kia OEM format and prefix (" + prefixCat.System + " / " + prefixCat.Category + ").",
 	}
 }
+
+// HKOEMPrefix returns the 2-digit prefix of a normalised HK OEM number,
+// or "" when the input does not match HK format. Provided for test compat.
+func HKOEMPrefix(rawOEM string) string {
+	compact := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(rawOEM, "-", ""), " ", ""))
+	if len(compact) < 2 {
+		return ""
+	}
+	return compact[:2]
+}
+
+// hkOEMPrefixes is the set of all known HK 2-digit prefixes.
+// Built once from the prefix catalog; used by bulk tests.
+var hkOEMPrefixes = func() map[string]bool {
+	m := make(map[string]bool)
+	for k := range prefixMap {
+		if len(k) >= 2 {
+			m[k[:2]] = true
+		}
+	}
+	return m
+}()
+
+// hasVehicleContext reports whether any vehicle context (linkageTargetId, CC, or fuel type)
+// is present. Used by confidence scoring to distinguish vehicle-scoped from universal searches.
+func hasVehicleContext(linkageTargetId, vehicleCC int, fuelType string) bool {
+	return linkageTargetId > 0 || vehicleCC > 0 || strings.TrimSpace(fuelType) != ""
+}
+
+// IsNonHKOEM is the logical complement of IsHKOEM: returns true when the
+// given OEM number is explicitly not a Hyundai/Kia part (has a non-HK prefix).
+func IsNonHKOEM(rawOEM string) bool {
+	result := IsHKOEM(rawOEM)
+	return !result.IsHK && result.SuggestedMake != ""
+}

@@ -238,7 +238,7 @@ func TestResultQuality_ArticleClassification(t *testing.T) {
 					// OEM part — IsHKOEM should be true if it has the right prefix
 					return
 				}
-				if IsHKOEM(art) {
+				if IsHKOEM(art).IsHK {
 					// This is a known edge case: some aftermarket article numbers
 					// like "22-263544" (BILSTEIN) have digit-first + dash format
 					// that matches HK prefix "22". Document but don't hard-fail.
@@ -369,7 +369,7 @@ func TestResultQuality_StrategyPerOEM(t *testing.T) {
 	for _, rc := range all {
 		rc := rc
 		t.Run(fmt.Sprintf("Strategy_%s", strings.ReplaceAll(rc.OEM, "-", "_")), func(t *testing.T) {
-			isHKOEM := IsHKOEM(rc.OEM)
+			isHKOEM := IsHKOEM(rc.OEM).IsHK
 			if !isHKOEM {
 				t.Logf("NOTE: %q failed IsHKOEM — may not be in HK prefix range", rc.OEM)
 			}

@@ -8,7 +8,7 @@ package service
 //   • For each seed OEM in a category, generate 100 systematic variants by
 //     enumerating suffixes (e.g. 26300-35505 → 26300-XXXXX for XXXXX = 00000..00099).
 //   • Every variant is tested against 5 dimensions:
-//       1. IsHKOEM(oem)              == true
+//       1. IsHKOEM(oem).IsHK              == true
 //       2. looksLikeOEMNumber(oem)   == true
 //       3. HKOEMPrefix(oem) is valid HK prefix
 //       4. NormalizeOEM(oem)         is deterministic + lowercase
@@ -161,8 +161,8 @@ func TestPerCategory_BulkSamples_IsHKOEM(t *testing.T) {
 				strings.ReplaceAll(spec.Category, " ", "_"),
 				strings.ReplaceAll(oem, "-", "_"))
 			t.Run(name, func(t *testing.T) {
-				if !IsHKOEM(oem) {
-					t.Errorf("IsHKOEM(%q) = false for category %q variant (base=%s)",
+				if !IsHKOEM(oem).IsHK {
+					t.Errorf("IsHKOEM(%q).IsHK = false for category %q variant (base=%s)",
 						oem, spec.Category, spec.Bases)
 				}
 			})

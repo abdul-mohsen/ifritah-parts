@@ -108,24 +108,24 @@ func TestSystematic_IsHKOEM_AllSeedFormats(t *testing.T) {
 		oem := oem
 		// Canonical dashed
 		t.Run(fmt.Sprintf("HKOEM_Dashed_%s", strings.ReplaceAll(oem, "-", "_")), func(t *testing.T) {
-			if !IsHKOEM(oem) {
-				t.Errorf("IsHKOEM(%q) = false, want true (dashed form)", oem)
+			if !IsHKOEM(oem).IsHK {
+				t.Errorf("IsHKOEM(%q).IsHK = false, want true (dashed form)", oem)
 			}
 		})
 		// Dashless
 		dashless := strings.ReplaceAll(oem, "-", "")
 		if len(dashless) >= 5 {
 			t.Run(fmt.Sprintf("HKOEM_Dashless_%s", strings.ReplaceAll(oem, "-", "_")), func(t *testing.T) {
-				if !IsHKOEM(dashless) {
-					t.Errorf("IsHKOEM(%q dashless=%q) = false, want true", oem, dashless)
+				if !IsHKOEM(dashless).IsHK {
+					t.Errorf("IsHKOEM(%q dashless=%q).IsHK = false, want true", oem, dashless)
 				}
 			})
 		}
 		// With space
 		withSpace := strings.ReplaceAll(oem, "-", " ")
 		t.Run(fmt.Sprintf("HKOEM_Spaces_%s", strings.ReplaceAll(oem, "-", "_")), func(t *testing.T) {
-			if !IsHKOEM(withSpace) {
-				t.Errorf("IsHKOEM(%q spaces=%q) = false, want true", oem, withSpace)
+			if !IsHKOEM(withSpace).IsHK {
+				t.Errorf("IsHKOEM(%q spaces=%q).IsHK = false, want true", oem, withSpace)
 			}
 		})
 	}
@@ -544,17 +544,17 @@ func TestSystematic_IsHKOEM_IsNonHKOEM_Symmetry(t *testing.T) {
 	for _, oem := range systematicOEMs {
 		oem := oem
 		t.Run(fmt.Sprintf("Sym_%s", strings.ReplaceAll(oem, "-", "_")), func(t *testing.T) {
-			hk := IsHKOEM(oem)
+			hk := IsHKOEM(oem).IsHK
 			nonHK := IsNonHKOEM(oem)
 			// For seed OEMs: IsHKOEM=true, IsNonHKOEM=false
 			if !hk {
-				t.Errorf("IsHKOEM(%q) = false for seed OEM", oem)
+				t.Errorf("IsHKOEM(%q).IsHK = false for seed OEM", oem)
 			}
 			if nonHK {
 				t.Errorf("IsNonHKOEM(%q) = true for seed OEM (should be false)", oem)
 			}
 			if hk == nonHK {
-				t.Errorf("IsHKOEM(%q) == IsNonHKOEM(%q) = %v (must differ)", oem, oem, hk)
+				t.Errorf("IsHKOEM(%q).IsHK == IsNonHKOEM(%q) = %v (must differ)", oem, oem, hk)
 			}
 		})
 	}
@@ -570,14 +570,14 @@ func TestSystematic_IsHKOEM_CompoundForms(t *testing.T) {
 		oem := oem
 		// Leading space → first char is ' ', not digit → correctly returns false
 		t.Run("LeadSpace_"+strings.ReplaceAll(oem, "-", "_"), func(t *testing.T) {
-			if IsHKOEM(" "+oem) {
-				t.Errorf("IsHKOEM(%q with leading space) = true, want false (space is not a digit)", oem)
+			if IsHKOEM(" "+oem).IsHK {
+				t.Errorf("IsHKOEM(%q with leading space).IsHK = true, want false (space is not a digit)", oem)
 			}
 		})
 		// Trailing space — first char is still the OEM digit → returns true
 		t.Run("TrailSpace_"+strings.ReplaceAll(oem, "-", "_"), func(t *testing.T) {
-			if !IsHKOEM(oem+" ") {
-				t.Errorf("IsHKOEM(%q with trailing space) = false, want true", oem)
+			if !IsHKOEM(oem+" ").IsHK {
+				t.Errorf("IsHKOEM(%q with trailing space).IsHK = false, want true", oem)
 			}
 		})
 	}
