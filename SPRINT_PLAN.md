@@ -75,6 +75,26 @@ Each task tagged with role. Agents claim tracks per sprint. **No two agents work
 | 6 | Rollout, monitoring, docs | 3 days | 3 |
 | **Total** | | **~31 days** | |
 
+### PR Sprint Label Map
+
+Commit history and PR #9 use granular labels S0–S8. The table below maps those
+labels to the plan sprints above so reviewers can navigate without confusion.
+
+| PR label | Plan sprint | What shipped |
+|----------|-------------|--------------|
+| S0 | Sprint 0 | P0 bug fixes: tecdoc_keyword gate, dedup, vehicle+text fallback, OEM normalisation, internal auth |
+| S1 | Sprint 1 | TecDoc query layer — 7 services (crossref, specs, docs, supersession, functional, vehicles, crossbrand), 60 tests |
+| S2 | Sprint 2 | Wire articlecrosses (30M rows), fix BUG-4/BUG-6, MySQL connection pooling |
+| S3 | Sprint 3 | Enrichment pipeline — SmartResult extended, parallel fan-out, `/api/search/modes` |
+| S4 | Sprint 4 | Strategy interface + searchCombined fan-out, circuit breaker per-instance |
+| S5 | Sprint 4 | Frontend — SearchModeSelector, StrategyBadge, SpecificationTable, CompatibilityChips, SupersessionChain, OemSearch wired |
+| S6 | Sprint 4 | spec_match strategy + SpecMatchStrategy safety ordering |
+| S7 | Sprint 4 | assembly_context strategy + AssemblySpec registry |
+| S8 | Sprint 4 | vin_assembly strategy — LinkageTargetToSpecs, VehicleConfigurator badge |
+| (review) | Sprint 5 (partial) | Review fixes: ConstantTimeCompare, 400 on bad mode/level, safety sorting, enrichment deadline, headers, ~30 tests |
+
+Sprint 5 (full QA gate: 900+ golden cases, per-mode scoring, Playwright e2e) and Sprint 6 (rollout) remain as future work.
+
 ---
 
 ## Sprint 0 — Setup & Baseline
