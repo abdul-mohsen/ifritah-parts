@@ -428,3 +428,39 @@ WHERE UPPER(kia_model) = UPPER($1);
 SELECT recommendation, COUNT(*)::int AS source_count
 FROM external_sources
 GROUP BY recommendation;
+
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- Phase 1: Prefix inference queries (hk_oem_prefix_map / hk_chassis_code_map /
+-- hk_variant_suffix_map)
+-- ────────────────────────────────────────────────────────────────────────────
+
+-- name: LookupOEMPrefix :one
+SELECT prefix, system, category, description, confidence, source
+FROM hk_oem_prefix_map
+WHERE prefix = $1
+LIMIT 1;
+
+-- name: LookupChassisCode :one
+SELECT chassis_code, make, model, platform, year_start, year_end, confidence, source
+FROM hk_chassis_code_map
+WHERE chassis_code = $1
+LIMIT 1;
+
+-- name: LookupVariantSuffix :one
+SELECT suffix, position, side, variant_note, confidence
+FROM hk_variant_suffix_map
+WHERE suffix = $1
+LIMIT 1;
+
+-- name: CountPrefixMapEntries :one
+SELECT COUNT(*)::int AS n_prefixes,
+       COUNT(*) FILTER (WHERE source = 'tecdoc_derived')::int AS n_derived,
+       COUNT(*) FILTER (WHERE source = 'seed')::int AS n_seed
+FROM hk_oem_prefix_map;
+
+-- name: CountChassisMapEntries :one
+SELECT COUNT(*)::int AS n_chassis,
+       COUNT(*) FILTER (WHERE source = 'tecdoc_derived')::int AS n_derived,
+       COUNT(*) FILTER (WHERE source = 'seed')::int AS n_seed
+FROM hk_chassis_code_map;

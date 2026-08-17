@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"parts-engine/internal/model"
@@ -247,4 +249,35 @@ func keysOf(m map[string][]model.OEMReference) []string {
 		ks = append(ks, k)
 	}
 	return ks
+}
+
+
+// TestCrossRefSQL_NoBrokenColumnReference guards against BUG-A regression:
+// the TecDoc 2020 schema does NOT have `ac.articleCrossNumber` — using it
+// caused `Error 1054 (42S22): Unknown column 'ac.articleCrossNumber' in 'field
+// list'` and silently broke cross_reference mode for every query.
+//
+// This test inspects the raw SQL source file to ensure the broken column name
+// is never reintroduced. It's a cheap static check — full integration is
+// covered by the /api/debug/logs manual QA in docs/reports/2026-08-17-manual-qa-search.md.
+func TestCrossRefSQL_NoBrokenColumnReference(t *testing.T) {
+	sourcePath := "tecdoc_crossref.go"
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	src := string(content)
+	// The literal SQL fragment must not appear in the query strings.
+	// A doc comment mentioning the historical bug IS allowed (it explains the fix).
+	// We grep for the fragment inside a SELECT / IN / WHERE context.
+	lines := strings.Split(src, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue // comments are allowed to mention the bug
+		}
+		if strings.Contains(line, "ac.articleCrossNumber") {
+			t.Errorf("tecdoc_crossref.go:%d — column 'ac.articleCrossNumber' does not exist in TecDoc 2020 (see BUG FIX comment in QueryCrossRefs)", i+1)
+		}
+	}
 }

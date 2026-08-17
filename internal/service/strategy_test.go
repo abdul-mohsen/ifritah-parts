@@ -17,6 +17,8 @@ import (
 func TestSearchStrategy_InterfaceContract(t *testing.T) {
 	s := &SmartSearch{}
 	strategies := []SearchStrategy{
+		&CacheStrategy{search: s},
+		&LegacyCascadeStrategy{search: s},
 		&ExactOEMStrategy{search: s},
 		&CrossReferenceStrategy{search: s},
 		&VehicleFitmentStrategy{search: s},
@@ -24,6 +26,7 @@ func TestSearchStrategy_InterfaceContract(t *testing.T) {
 		&CrossBrandStrategy{search: s},
 		&OwnedCatalogStrategy{search: s},
 		&KeywordGatedStrategy{search: s},
+		&PrefixInferenceStrategy{search: s},
 		&SpecMatchStrategy{search: s},
 		&AssemblyContextStrategy{search: s},
 		&VinAssemblyStrategy{search: s},
@@ -84,7 +87,7 @@ func TestAvailableModes_MinimalRegistry(t *testing.T) {
 		keys[m.Key] = true
 	}
 	// Base modes MUST always be present
-	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "combined"}
+	baseModes := []string{"exact_oem", "cross_reference", "vehicle_fitment", "supersession", "cross_brand", "owned_catalog", "keyword_gated", "legacy", "prefix_inference", "cache", "combined"}
 	for _, want := range baseModes {
 		if !keys[want] {
 			t.Errorf("AvailableModes() missing base mode %q; got %v", want, keys)
@@ -649,5 +652,98 @@ func TestStrategyForMode_ReturnsNewWrappers(t *testing.T) {
 	}
 	if _, ok := s.strategyForMode("keyword_gated").(*KeywordGatedStrategy); !ok {
 		t.Errorf("strategyForMode('keyword_gated') did not return *KeywordGatedStrategy")
+	}
+}
+
+
+// ─── isMostlyDigits guard ─────────────────────────────────────────────────
+
+// TestIsMostlyDigits verifies the guard that stops KeywordGated from
+// polluting results with digit-substring matches on OEM numbers.
+func TestIsMostlyDigits(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"82460-2T010", true},   // OEM — mostly digits, should be blocked
+		{"26350-2J001", true},   // OEM
+		{"97133-D3000", true},   // OEM
+		{"18855-10080", true},   // OEM
+		{"oil filter", false},   // Free text — should keyword search
+		{"cabin air filter", false},
+		{"MANN W712/4", false},  // Aftermarket brand+number, mixed
+		{"BOSCH 0451103314", false}, // Brand name dominates
+		{"", false},             // Empty
+		{"12345", true},         // Pure digits
+		{"abc", false},          // Pure letters
+	}
+	for _, tc := range cases {
+		if got := isMostlyDigits(tc.in); got != tc.want {
+			t.Errorf("isMostlyDigits(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestKeywordGatedStrategy_SkipsOEMShapedQuery verifies the pollution fix:
+// a real OEM like "82460-2T010" must NOT return keyword matches like
+// "Pressure Hose, air compressor" whose article number just happens to
+// share the "82460" digit substring.
+func TestKeywordGatedStrategy_SkipsOEMShapedQuery(t *testing.T) {
+	s := &SmartSearch{}
+	strategy := &KeywordGatedStrategy{search: s}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	// OEM-shaped input should short-circuit and return nothing.
+	results, err := strategy.Search(ctx, StrategyRequest{Query: "82460-2T010", Limit: 10})
+	if err != nil {
+		t.Errorf("Search err=%v, want nil", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("KeywordGated returned %d results for OEM-shaped query, want 0 (would be digit-substring pollution)", len(results))
+	}
+}
+
+// ─── LegacyCascadeStrategy — S4-T2 completion ─────────────────────────────
+
+// TestLegacyCascadeStrategy_NoInputReturnsNil verifies short-circuit when
+// neither Query nor LinkageTargetId is provided.
+func TestLegacyCascadeStrategy_NoInputReturnsNil(t *testing.T) {
+	strategy := &LegacyCascadeStrategy{search: &SmartSearch{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	results, err := strategy.Search(ctx, StrategyRequest{Limit: 10})
+	if err != nil {
+		t.Errorf("empty input err=%v, want nil", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("empty input returned %d results, want 0", len(results))
+	}
+}
+
+// TestLegacyCascadeStrategy_PriorityRanking verifies legacy outranks
+// everything except exact_oem in the combined merge.
+func TestLegacyCascadeStrategy_PriorityRanking(t *testing.T) {
+	s := &SmartSearch{}
+	legacy := (&LegacyCascadeStrategy{search: s}).Priority()
+	exact := (&ExactOEMStrategy{search: s}).Priority()
+	crossRef := (&CrossReferenceStrategy{search: s}).Priority()
+	keyword := (&KeywordGatedStrategy{search: s}).Priority()
+	if legacy > exact {
+		t.Errorf("legacy priority (%f) must be <= exact_oem (%f)", legacy, exact)
+	}
+	if legacy <= crossRef {
+		t.Errorf("legacy priority (%f) must be > cross_reference (%f) — legacy is the widest net", legacy, crossRef)
+	}
+	if legacy <= keyword {
+		t.Errorf("legacy priority (%f) must be > keyword_gated (%f)", legacy, keyword)
+	}
+}
+
+// TestStrategyForMode_ReturnsLegacyCascade verifies /?mode=legacy dispatches
+// to LegacyCascadeStrategy.
+func TestStrategyForMode_ReturnsLegacyCascade(t *testing.T) {
+	s := &SmartSearch{}
+	if _, ok := s.strategyForMode("legacy").(*LegacyCascadeStrategy); !ok {
+		t.Errorf("strategyForMode('legacy') did not return *LegacyCascadeStrategy")
 	}
 }

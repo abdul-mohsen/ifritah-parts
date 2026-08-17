@@ -25,7 +25,7 @@ type PartsOuqService struct {
 // Pass cache=nil to disable caching.
 func NewPartsOuqService(cache *PartsCache) *PartsOuqService {
 	return &PartsOuqService{
-		client: &http.Client{Timeout: 15 * time.Second},
+		client: &http.Client{Timeout: 3 * time.Second},
 		cache:  cache,
 	}
 }

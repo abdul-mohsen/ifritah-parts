@@ -24,7 +24,7 @@ type DealerLookup struct {
 
 func NewDealerLookup(cache *PartsCache) *DealerLookup {
 	return &DealerLookup{
-		client: &http.Client{Timeout: 12 * time.Second},
+		client: &http.Client{Timeout: 3 * time.Second},
 		cache:  cache,
 	}
 }
