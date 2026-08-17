@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
+	"parts-engine/db/migrations"
 	"parts-engine/internal/config"
 	"parts-engine/internal/db"
 	dbg "parts-engine/internal/debug"
@@ -58,6 +60,16 @@ func main() {
 	if pg != nil {
 		dataDBAvailable = true
 		defer pg.Close()
+
+		// App-managed migrations — replaces the postgres initdb hook so that
+		// migrations added after the initial deploy still get applied on the
+		// next container start. Idempotent, advisory-locked, safe across
+		// multi-replica deployments. Every migration file must be idempotent
+		// (all existing files use CREATE TABLE IF NOT EXISTS + ON CONFLICT
+		// DO NOTHING, which is enforced by the tests in internal/db/*_test.go).
+		if err := db.RunMigrations(pg, migrations.FS, "."); err != nil {
+			log.Fatalf("✗ migrations failed — refusing to start with a stale schema: %v", err)
+		}
 	} else {
 		log.Println("⚠ Running without PostgreSQL application data — only NHTSA decode + recalls will work")
 	}
@@ -158,6 +170,24 @@ func main() {
 		oemCache := service.NewOEMCache(pg)
 		smartSearch.SetOEMCache(oemCache)
 		log.Printf("✓ Persistent OEM cache wired (Postgres migration 000012)")
+	}
+
+	// Auto-start the TecDoc-derive background worker. Runs immediately (with
+	// a 3s jitter) if the 30-day cadence has elapsed since the last successful
+	// derive, then monthly thereafter. Uses a Postgres advisory lock so a
+	// multi-replica deploy still runs derive at most once per cadence window.
+	//
+	// When MySQL is unreachable, the worker no-ops silently — the hand-curated
+	// seed baseline from migration 000011 stays in place and the app keeps
+	// working. This is why we never call log.Fatal from here.
+	//
+	// Operators can still force an immediate derive from a CLI via
+	// `go run ./scripts/derive_hk_maps --force` — that CLI acquires the same
+	// advisory lock so it's mutually exclusive with the background worker.
+	if pg != nil {
+		deriveWorker := service.NewDeriveWorker(pg, mysql)
+		deriveWorker.Start(context.Background())
+		log.Printf("✓ TecDoc derive worker started (monthly cadence, advisory-locked)")
 	}
 
 	// When MySQL is connected, wire the full TecDoc reader into SmartSearch.

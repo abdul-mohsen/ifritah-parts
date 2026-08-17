@@ -2,16 +2,33 @@
 #
 # This image bundles PostgreSQL + the Go server + the built React frontend
 # into ONE container so the whole app boots with `docker run -p 8080:8080`.
-# The DB migrations in db/migrations/ auto-apply on first boot via the
-# postgres:17-alpine entrypoint hook (/docker-entrypoint-initdb.d/).
+#
+# Schema migrations are applied by the app itself on every start via
+# internal/db/migrator.go — the SQL files are embedded into the binary
+# through db/migrations/embed.go, so nothing extra needs to be shipped.
+# This replaces the previous /docker-entrypoint-initdb.d/ approach which
+# only ran migrations on first boot (empty volume) and couldn't handle
+# migrations added after the initial deploy.
+#
+# The migration runner uses a Postgres advisory lock so multi-replica
+# deployments (docker-compose scale, k8s multi-pod) never race, and every
+# migration file uses CREATE TABLE IF NOT EXISTS + ON CONFLICT DO NOTHING
+# so re-running is a no-op.
+#
+# The TecDoc-derive worker also starts automatically (see main.go). It
+# no-ops when TECDOC_* env vars aren't set — the hand-curated seed
+# baseline in migration 000011 remains active.
 #
 # Layout at runtime:
-#   /app/server                 — Go binary (foreground process)
+#   /app/server                 — Go binary (foreground process; runs
+#                                 migrations + starts derive worker on boot)
 #   /app/qa_gate                — Go binary (QA gate; optional invocation)
 #   /app/import_legacy_cache    — Go binary (SQLite → Postgres bootstrap)
+#   /app/derive_hk_maps         — Go binary (CLI wrapper — normally not
+#                                 needed since main.go auto-runs derive;
+#                                 kept for on-demand --force runs)
 #   /app/frontend/dist          — Built React SPA
 #   /app/data                   — Read-only seed data (hk_parts.db, vpic.lite.db, …)
-#   /docker-entrypoint-initdb.d — SQL migrations (auto-run on first boot)
 #   /var/lib/postgresql/data    — Postgres data (mount a volume for persistence)
 #   /entrypoint.sh              — Boots pg → waits → starts server
 #
@@ -46,10 +63,12 @@ COPY go.mod go.sum ./
 RUN go mod download || (GOPROXY=direct go mod download)
 COPY cmd/ cmd/
 COPY internal/ internal/
+COPY scripts/ scripts/
 COPY db/ db/
 RUN go build -ldflags="-s -w" -o /out/server ./cmd/server && \
     go build -ldflags="-s -w" -o /out/qa_gate ./cmd/qa_gate && \
-    go build -ldflags="-s -w" -o /out/import_legacy_cache ./cmd/import_legacy_cache
+    go build -ldflags="-s -w" -o /out/import_legacy_cache ./cmd/import_legacy_cache && \
+    go build -ldflags="-s -w" -o /out/derive_hk_maps ./scripts/derive_hk_maps
 
 # ── Stage 3: Runtime — Postgres + Server + SPA ──────────
 FROM postgres:17-alpine
@@ -65,12 +84,17 @@ WORKDIR /app
 COPY --from=builder /out/server /app/server
 COPY --from=builder /out/qa_gate /app/qa_gate
 COPY --from=builder /out/import_legacy_cache /app/import_legacy_cache
+COPY --from=builder /out/derive_hk_maps /app/derive_hk_maps
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 COPY data/ /app/data/
-COPY db/migrations/ /docker-entrypoint-initdb.d/
 COPY container/entrypoint.sh /entrypoint.sh
 
-RUN chmod +x /entrypoint.sh /app/server /app/qa_gate /app/import_legacy_cache
+# NOTE: migrations are NOT copied to /docker-entrypoint-initdb.d/ any more.
+# The app-managed migrator in internal/db/migrator.go runs them on every
+# boot from the SQL files embedded into /app/server via db/migrations/embed.go.
+# This handles both the first-boot bootstrap AND any migrations added later.
+
+RUN chmod +x /entrypoint.sh /app/server /app/qa_gate /app/import_legacy_cache /app/derive_hk_maps
 
 # ── Embedded Postgres defaults ────────────────────────────
 # These names must match the app's PG* env vars below. The postgres:17-alpine
@@ -86,6 +110,11 @@ ENV POSTGRES_USER=parts \
 # CORS_ORIGINS is intentionally left unset — deployers must set an explicit
 # allowlist (e.g. "https://ifritah.com,https://qa.ifritah.com"). The server
 # refuses to enable AllowCredentials when the allowlist contains "*".
+#
+# MYSQL_*  — optional. When set, the TecDoc reader + the derive worker
+#            connect to an external TecDoc MySQL instance. When unset, the
+#            app runs with prefix-inference seed baseline only. This is the
+#            fully-decoupled operating mode.
 ENV BIND_ADDR=0.0.0.0 \
     PORT=8080 \
     DATA_DIR=/app/data \
