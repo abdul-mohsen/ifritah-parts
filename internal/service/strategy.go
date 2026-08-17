@@ -109,6 +109,7 @@ func (s *SmartSearch) AvailableModes() []SearchMode {
 		{Key: "owned_catalog", Name: "Owned Catalog", Description: "Direct lookup against the owned hk_parts_cache — fast, exact article-number match"},
 		{Key: "keyword_gated", Name: "Keyword (Gated)", Description: "TecDoc full-text search filtered by category so 'oil filter' cannot return 'strut mounting'"},
 		{Key: "legacy", Name: "Legacy Cascade", Description: "The original pre-Smart-Search cascade: Postgres index → TecDoc → suffix strip → prefix match → online partsouq → dealer scrape → supersession. Slower but the widest net."},
+		{Key: "prefix_inference", Name: "Prefix Inference", Description: "Synthesize an OEM description from part-family prefix + chassis code — always available, no network, ~5 ms. Fills gaps where TecDoc lacks aftermarket crosses."},
 		{Key: "combined", Name: "Smart Search", Description: "Automatically runs all strategies in parallel and merges the best results"},
 	}
 	// Conditionally add modes that require TecDoc services.
@@ -144,6 +145,8 @@ func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 		return &KeywordGatedStrategy{search: s}
 	case "legacy":
 		return &LegacyCascadeStrategy{search: s}
+	case "prefix_inference":
+		return &PrefixInferenceStrategy{search: s}
 	case "spec_match", "assembly_context", "vin_assembly":
 		if s.tecDocSpecs == nil {
 			return nil
@@ -187,6 +190,7 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		&CrossBrandStrategy{search: s},
 		&OwnedCatalogStrategy{search: s},
 		&KeywordGatedStrategy{search: s},
+		&PrefixInferenceStrategy{search: s},
 	}
 	if s.tecDocSpecs != nil {
 		strategies = append(strategies,
@@ -662,4 +666,43 @@ func (st *LegacyCascadeStrategy) Search(ctx context.Context, req StrategyRequest
 		}
 	}
 	return resp.Results, nil
+}
+
+
+// PrefixInferenceStrategy synthesizes a description for the OEM by
+// decomposing it into (5-digit part-family prefix, 2-char chassis code,
+// 3-char variant suffix) and joining each against the Postgres lookup
+// tables seeded by migration 000011 + auto-enriched by
+// scripts/derive_hk_maps/main.go.
+//
+// The strategy always runs offline and completes in ~5 ms. Its output is
+// gated to a max confidence of 0.90 — a live source (TecDoc, dealer_lookup)
+// always outranks pure inference. When a live source AGREES with the
+// inference, its confidence gets boosted via corroboration (Phase 2).
+//
+// Priority 0.55 — below every live-data strategy but above keyword_gated
+// (0.50), so combined-mode returns inferred results only when nothing
+// verified exists.
+type PrefixInferenceStrategy struct{ search *SmartSearch }
+
+func (st *PrefixInferenceStrategy) Name() string            { return "prefix_inference" }
+func (st *PrefixInferenceStrategy) ConfidenceBase() float64 { return 0.85 }
+func (st *PrefixInferenceStrategy) Priority() float64       { return 0.55 }
+func (st *PrefixInferenceStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
+	if st.search == nil || st.search.prefixInference == nil {
+		return nil, nil
+	}
+	// Guard: only run on OEM-shaped queries. Free text is not decoded.
+	q := req.OEM
+	if q == "" {
+		q = req.Query
+	}
+	if q == "" || !looksLikeOEMNumber(q) {
+		return nil, nil
+	}
+	result := st.search.prefixInference.Synthesize(ctx, q)
+	if result == nil {
+		return nil, nil
+	}
+	return []SmartResult{*result}, nil
 }

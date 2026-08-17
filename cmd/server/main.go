@@ -139,6 +139,17 @@ func main() {
 	dealerLookup := service.NewDealerLookup(partsCache)
 	smartSearch.SetDealerLookup(dealerLookup)
 
+	// Phase 1 (2026-08-17): prefix + chassis-code inference. Requires the
+	// Postgres tables from migration 000011 (hk_oem_prefix_map,
+	// hk_chassis_code_map, hk_variant_suffix_map). Seeded with hand-curated
+	// baseline; optionally enriched by `go run ./scripts/derive_hk_maps`
+	// which clusters TecDoc data. Zero external calls at query time.
+	if pg != nil {
+		prefixInf := service.NewPrefixInference(pg)
+		smartSearch.SetPrefixInference(prefixInf)
+		log.Printf("✓ Prefix-inference strategy wired (Postgres migration 000011)")
+	}
+
 	// When MySQL is connected, wire the full TecDoc reader into SmartSearch.
 	// The SmartSearch cascade uses TecDoc as an early-hit strategy for OEM
 	// searches that miss the local Postgres cache — the source-of-truth for
