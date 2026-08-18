@@ -204,7 +204,19 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Combined-mode fan-out deadline. Chosen so:
+	//   * The two slowest strategies (ExactOEMStrategy runs the full
+	//     legacy cascade with dealer_lookup at 3s + TecDoc primary at
+	//     ~5s = ~8-10s p95) can still contribute
+	//   * A pathological upstream (TecDoc lock, PartsOuq hang) can't
+	//     block combined mode past this ceiling — the collect loop
+	//     drains partial results on ctx.Done()
+	//   * User-facing p95 stays below the 15s browser/reverse-proxy
+	//     timeout observed in qa
+	//
+	// Fast strategies (prefix_inference 5 ms, cache 50 ms) always beat
+	// this budget so combined-mode always returns SOMETHING useful.
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
 	type stratResult struct {
@@ -243,31 +255,79 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		close(resultCh)
 	}()
 
-	// Collect and merge results
-	// Priority lookup: populated when a strategy sends to resultCh
+	// Collect and merge results.
+	//
+	// BUG FIX 2026-08-17 (round 3): the previous impl used
+	//   for sr := range resultCh { ... }
+	// which blocks until close(resultCh) — and close only happens when
+	// wg.Wait() returns, which requires EVERY strategy goroutine to finish.
+	// When a strategy doesn't respect ctx (e.g. a MySQL query that runs
+	// past ctx.Done()), the whole combined mode blocks past its 3s budget
+	// and the user waits 15 s+ for a "combined" search. The debug-log
+	// capture from qa.ifritah.com showed exactly this: TecDoc.SearchByOEM.
+	// primary took 4.8 s per call, combined timed out at 15 s.
+	//
+	// Fix: drain resultCh with a select that ALSO listens on ctx.Done().
+	// When the deadline fires we stop collecting even if slow strategies
+	// are still running (they'll finish in the background and be
+	// discarded). Prefix inference (5 ms) and cache hits (~50 ms) always
+	// return within budget so combined mode is never worse than the
+	// fastest strategy.
+	//
+	// BUG FIX 2026-08-17 (round 3, second): also dedupe by ArticleNumber
+	// when LegacyArticleId <= 0. Previously the merge dropped every
+	// result with LegacyArticleId=0 — which is EVERY prefix_inference
+	// result (they synthesize descriptions, not TecDoc rows). This meant
+	// combined mode never surfaced prefix inference results even when
+	// they were the only correct answer available.
 	priorities := make(map[string]float64)
-	seen := make(map[int]SmartResult)
-	var order []int
+	seen := make(map[string]SmartResult)
+	var order []string
 
-	for sr := range resultCh {
-		priorities[sr.name] = sr.priority
-		for _, r := range sr.results {
-			if r.LegacyArticleId <= 0 {
-				continue
+	// dedupeKey returns a stable identifier for the article. Preferred:
+	// legacyArticleId (fast, guaranteed unique across TecDoc). Fallback:
+	// uppercase article number (works for synthesized results that don't
+	// have a TecDoc id, like prefix_inference).
+	dedupeKey := func(r SmartResult) string {
+		if r.LegacyArticleId > 0 {
+			return fmt.Sprintf("id:%d", r.LegacyArticleId)
+		}
+		if r.ArticleNumber != "" {
+			return "an:" + strings.ToUpper(r.ArticleNumber)
+		}
+		return "" // no stable identifier; skip
+	}
+
+collectLoop:
+	for {
+		select {
+		case sr, ok := <-resultCh:
+			if !ok {
+				break collectLoop // channel closed — all strategies finished
 			}
-			if existing, ok := seen[r.LegacyArticleId]; ok {
-				// Convergence bonus: same article from ≥2 strategies
-				// Cap at 1.0 to keep confidence meaningful.
-				bonus := min64(max64(r.Confidence, existing.Confidence)*1.05, 1.0)
-				r.Confidence = bonus
-				if !strings.Contains(existing.SourceStrategy, r.SourceStrategy) {
-					r.SourceStrategy = existing.SourceStrategy + "," + r.SourceStrategy
+			priorities[sr.name] = sr.priority
+			for _, r := range sr.results {
+				key := dedupeKey(r)
+				if key == "" {
+					continue
 				}
-				seen[r.LegacyArticleId] = r
-			} else {
-				seen[r.LegacyArticleId] = r
-				order = append(order, r.LegacyArticleId)
+				if existing, ok := seen[key]; ok {
+					// Convergence bonus: same article from ≥2 strategies
+					// Cap at 1.0 to keep confidence meaningful.
+					bonus := min64(max64(r.Confidence, existing.Confidence)*1.05, 1.0)
+					r.Confidence = bonus
+					if !strings.Contains(existing.SourceStrategy, r.SourceStrategy) {
+						r.SourceStrategy = existing.SourceStrategy + "," + r.SourceStrategy
+					}
+					seen[key] = r
+				} else {
+					seen[key] = r
+					order = append(order, key)
+				}
 			}
+		case <-ctx.Done():
+			log.Printf("[Combined] ctx deadline exceeded — returning %d partial results (some strategies may still be running)", len(seen))
+			break collectLoop
 		}
 	}
 

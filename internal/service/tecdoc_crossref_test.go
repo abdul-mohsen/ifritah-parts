@@ -253,13 +253,19 @@ func keysOf(m map[string][]model.OEMReference) []string {
 
 
 // TestCrossRefSQL_NoBrokenColumnReference guards against BUG-A regression:
-// the TecDoc 2020 schema does NOT have `ac.articleCrossNumber` — using it
-// caused `Error 1054 (42S22): Unknown column 'ac.articleCrossNumber' in 'field
-// list'` and silently broke cross_reference mode for every query.
+// the TecDoc 2020 schema does NOT have `ac.articleCrossNumber` NOR
+// `ac.cleanCrossNumber` NOR `ac.mfrName` — the actual columns are
+// `ac.oemNumber`, `ac.number`, `ac.brandName`, `ac.mfrId`, `ac.legacyArticleId`.
+// Using any of the wrong names surfaced as:
 //
-// This test inspects the raw SQL source file to ensure the broken column name
-// is never reintroduced. It's a cheap static check — full integration is
-// covered by the /api/debug/logs manual QA in docs/reports/2026-08-17-manual-qa-search.md.
+//	Error 1054 (42S22): Unknown column 'ac.XXXNumber' in 'field list'
+//
+// and silently broke cross_reference mode for every query.
+//
+// This test inspects the raw SQL source file to ensure the broken column
+// names are never reintroduced. It's a cheap static check — full
+// integration is covered by the /api/debug/logs manual QA in
+// docs/reports/2026-08-17-manual-qa-search.md.
 func TestCrossRefSQL_NoBrokenColumnReference(t *testing.T) {
 	sourcePath := "tecdoc_crossref.go"
 	content, err := os.ReadFile(sourcePath)
@@ -267,17 +273,25 @@ func TestCrossRefSQL_NoBrokenColumnReference(t *testing.T) {
 		t.Fatalf("read source: %v", err)
 	}
 	src := string(content)
-	// The literal SQL fragment must not appear in the query strings.
-	// A doc comment mentioning the historical bug IS allowed (it explains the fix).
-	// We grep for the fragment inside a SELECT / IN / WHERE context.
+
+	// The literal SQL fragments must not appear in the query strings.
+	// Doc comments mentioning the historical bug ARE allowed (they explain
+	// the fix). Grep line-by-line and skip lines starting with `//`.
+	forbidden := []string{
+		"ac.articleCrossNumber", // was in v1 of the fix, broke CI
+		"ac.cleanCrossNumber",   // was in v2 of the fix, broke qa deploy
+		"ac.mfrName",            // wrong column — TecDoc 2020 uses ac.mfrId + join manufacturers
+	}
 	lines := strings.Split(src, "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") {
-			continue // comments are allowed to mention the bug
+			continue
 		}
-		if strings.Contains(line, "ac.articleCrossNumber") {
-			t.Errorf("tecdoc_crossref.go:%d — column 'ac.articleCrossNumber' does not exist in TecDoc 2020 (see BUG FIX comment in QueryCrossRefs)", i+1)
+		for _, bad := range forbidden {
+			if strings.Contains(line, bad) {
+				t.Errorf("tecdoc_crossref.go:%d — column %q does not exist in TecDoc 2020 (see BUG FIX comment in QueryCrossRefs)", i+1, bad)
+			}
 		}
 	}
 }

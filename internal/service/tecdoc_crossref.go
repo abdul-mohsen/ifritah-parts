@@ -163,26 +163,35 @@ type sqlCrossRefRepo struct {
 }
 
 func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error) {
-	// BUG FIX 2026-08-17: the SELECT list originally used `ac.articleCrossNumber`
-	// which does not exist in the TecDoc 2020 schema — the query failed with
-	// "Error 1054 (42S22): Unknown column 'ac.articleCrossNumber' in 'field list'"
-	// and broke cross_reference mode entirely (confirmed via /api/debug/logs).
-	// Selecting `ac.cleanCrossNumber` twice keeps the row shape consistent
-	// (RawCrossNumber field receives the normalized value — that's the only
-	// column we're sure exists across TecDoc dumps).
+	// BUG FIX 2026-08-17 (round 2): the TecDoc 2020 articlecrosses schema
+	// has NEITHER ac.articleCrossNumber NOR ac.cleanCrossNumber — the actual
+	// columns are `ac.oemNumber` (raw OEM), `ac.number` (aftermarket article
+	// number), `ac.brandName`, `ac.mfrId`, `ac.legacyArticleId`. Verified
+	// against sql/04_oem_index.sql (the working seed script that populates
+	// the search index FROM this same table) and the /api/debug/logs stream
+	// which surfaced 'Error 1054: Unknown column ac.cleanCrossNumber'.
+	//
+	// The WHERE clause matches by inline-normalizing ac.oemNumber. This
+	// disables the index on `oemNumber` (function-on-column) but is the
+	// simplest correct query — 30M rows scanned but bounded by LIMIT and
+	// by combined-mode's timeout enforcement (see strategy.go).
+	//
+	// Callers pass cleanOEM already normalized (NormalizeOEM: lowercase,
+	// no dashes/spaces/dots/slashes). We match against the SAME
+	// normalization applied to the raw column.
 	const q = `
 		SELECT
-			ac.cleanCrossNumber,
-			COALESCE(ac.mfrName, ''),
+			ac.oemNumber,
+			COALESCE(m.manuName, ''),
 			COALESCE(a.legacyArticleId, 0),
 			COALESCE(a.articleNumber, ''),
 			COALESCE(a.genericArticleDescription, ''),
-			COALESCE(ab.brandName, ''),
-			COALESCE(ac.originalOemManufacturer, '')
+			COALESCE(ac.brandName, ''),
+			COALESCE(m.manuName, '')
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
-		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-		WHERE ac.cleanCrossNumber = ?
+		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
+		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) = ?
 		LIMIT ?`
 
 	rows, err := logQueryCtx(r.db, ctx, "TecDocCrossRef.SearchCrossReferences", q, cleanOEM, limit)
@@ -245,18 +254,18 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 
 	q := fmt.Sprintf(`
 		SELECT
-			ac.cleanCrossNumber,
-			ac.cleanCrossNumber,
-			COALESCE(ac.mfrName, ''),
+			LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) AS clean_oem,
+			ac.oemNumber,
+			COALESCE(m.manuName, ''),
 			COALESCE(a.legacyArticleId, 0),
 			COALESCE(a.articleNumber, ''),
 			COALESCE(a.genericArticleDescription, ''),
-			COALESCE(ab.brandName, ''),
-			COALESCE(ac.originalOemManufacturer, '')
+			COALESCE(ac.brandName, ''),
+			COALESCE(m.manuName, '')
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
-		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-		WHERE ac.cleanCrossNumber IN (%s)
+		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
+		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) IN (%s)
 		LIMIT %d`, placeholders, totalLimit)
 
 	args := make([]any, 0, len(uniq))
