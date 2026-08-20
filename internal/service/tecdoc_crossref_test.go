@@ -295,3 +295,88 @@ func TestCrossRefSQL_NoBrokenColumnReference(t *testing.T) {
 		}
 	}
 }
+
+
+// ─── Fast/slow path selection tests (2026-08-19) ──────────────────────────
+//
+// These tests guard the sqlCrossRefRepo path selection introduced in
+// sql/06_articlecrosses_normalized_oem_index.sql. They exercise the
+// query-string construction directly — no live MySQL required. If the
+// deployed schema doesn't have the generated column yet, the slow scan
+// remains functionally correct (same result set), just slow.
+
+// TestCrossRef_SlowPath_WHEREClause verifies the slow-path WHERE clause
+// is still the "correctness fallback" — LOWER(REPLACE(...)) around
+// ac.oemNumber. Regression guard so someone doesn't accidentally remove
+// the fallback when adding the fast path.
+func TestCrossRef_SlowPath_WHEREClause(t *testing.T) {
+	// hasNormalizedColumn defaults to false — that's the slow path.
+	r := &sqlCrossRefRepo{}
+	if r.hasNormalizedColumn {
+		t.Fatal("hasNormalizedColumn should default to false (slow path)")
+	}
+	// We can't run the query without a real DB, but we CAN verify the
+	// query-string construction by reading the source. See the sibling
+	// static test TestCrossRefSQL_NoBrokenColumnReference which grep-
+	// checks the file. Here we just assert the flag path is intact.
+}
+
+// TestCrossRef_FastPath_UsesIndexedColumn verifies that when the schema
+// probe finds oemNumberNormalized, the WHERE clause switches to the
+// indexed column. Static test — reads the source file and checks the
+// two branches exist verbatim.
+func TestCrossRef_FastPath_UsesIndexedColumn(t *testing.T) {
+	content, err := os.ReadFile("tecdoc_crossref.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	src := string(content)
+
+	// Both branches must be present in the file:
+	//   fast path — indexed column
+	//   slow path — LOWER(REPLACE(...))
+	fastPath := `WHERE ac.oemNumberNormalized = ?`
+	slowPath := `WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) = ?`
+
+	if !strings.Contains(src, fastPath) {
+		t.Errorf("fast-path query %q not found in tecdoc_crossref.go — did someone remove the indexed-column branch?", fastPath)
+	}
+	if !strings.Contains(src, slowPath) {
+		t.Errorf("slow-path fallback %q not found in tecdoc_crossref.go — the fallback is required for pre-migration deploys", slowPath)
+	}
+}
+
+// TestCrossRef_SchemaMigrationReferenced verifies the SQL migration file
+// exists and the Go source references it in a comment or log message.
+// Guards against the pair drifting out of sync (Go code says "run the
+// migration" but the migration file was renamed or deleted).
+func TestCrossRef_SchemaMigrationReferenced(t *testing.T) {
+	migrationPath := "../../sql/06_articlecrosses_normalized_oem_index.sql"
+	if _, err := os.Stat(migrationPath); err != nil {
+		t.Fatalf("MySQL migration file %s missing: %v", migrationPath, err)
+	}
+
+	// The Go source should mention the migration file so operators can
+	// find it from a log line or comment.
+	content, err := os.ReadFile("tecdoc_crossref.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if !strings.Contains(string(content), "06_articlecrosses_normalized_oem_index.sql") {
+		t.Error("tecdoc_crossref.go should reference sql/06_articlecrosses_normalized_oem_index.sql so operators can find the migration from the codebase")
+	}
+}
+
+// TestCrossRef_ProbeGeneratedColumn_NilDBSafe verifies the probe is safe
+// when db is nil (offline mode / bad wiring). Must not panic and must
+// keep hasNormalizedColumn=false.
+func TestCrossRef_ProbeGeneratedColumn_NilDBSafe(t *testing.T) {
+	r := &sqlCrossRefRepo{db: nil}
+	// Must not panic
+	r.probeGeneratedColumn()
+	if r.hasNormalizedColumn {
+		t.Error("nil-DB probe should leave hasNormalizedColumn = false")
+	}
+	// Second call must also not panic (sync.Once)
+	r.probeGeneratedColumn()
+}

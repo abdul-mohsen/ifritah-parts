@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"parts-engine/internal/model"
 )
@@ -158,28 +161,76 @@ func (s *TecDocCrossRef) SearchCrossReferencesBatch(oemNumbers []string, limitPe
 // It runs the articlecrosses query with LEFT JOIN so parts missing from
 // the local articles view still surface with an empty article number
 // (the raw crossOemNumber alone is still evidence).
+//
+// Performance path (see sql/06_articlecrosses_normalized_oem_index.sql):
+//
+//	When the generated column `articlecrosses.oemNumberNormalized` (+ its
+//	index `idx_articlecrosses_oemNumberNormalized`) exists, the WHERE clause
+//	uses that indexed column → O(log n) lookup, sub-10ms.
+//
+//	When the column doesn't exist (pre-migration deploys), the repo falls
+//	back to the correctness-preserving `LOWER(REPLACE(REPLACE(...)))` form
+//	that scans the full 30M-row table. This path also produces the correct
+//	results but takes 3-8 HOURS per query — the 15s Go ctx deadline fires
+//	long before the query finishes. See docs/reports/2026-08-19-post-pr14-
+//	data-quality.md §5 for the debug-log evidence.
+//
+// The `hasNormalizedColumn` flag is probed once at first query and cached.
+// A restart is required to pick up a column that appears while the process
+// is running — acceptable because the DDL is a deploy-time operation.
 type sqlCrossRefRepo struct {
 	db *sql.DB
+
+	// probeOnce ensures the information_schema check runs at most once
+	// per process lifetime, regardless of concurrent callers.
+	probeOnce sync.Once
+	// hasNormalizedColumn is set by probeOnce. When true, queries use the
+	// fast index; when false, queries fall back to the slow scan and log
+	// a WARN so ops notices the migration hasn't been applied.
+	hasNormalizedColumn bool
 }
 
-func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error) {
-	// BUG FIX 2026-08-17 (round 2): the TecDoc 2020 articlecrosses schema
-	// has NEITHER ac.articleCrossNumber NOR ac.cleanCrossNumber — the actual
-	// columns are `ac.oemNumber` (raw OEM), `ac.number` (aftermarket article
-	// number), `ac.brandName`, `ac.mfrId`, `ac.legacyArticleId`. Verified
-	// against sql/04_oem_index.sql (the working seed script that populates
-	// the search index FROM this same table) and the /api/debug/logs stream
-	// which surfaced 'Error 1054: Unknown column ac.cleanCrossNumber'.
-	//
-	// The WHERE clause matches by inline-normalizing ac.oemNumber. This
-	// disables the index on `oemNumber` (function-on-column) but is the
-	// simplest correct query — 30M rows scanned but bounded by LIMIT and
-	// by combined-mode's timeout enforcement (see strategy.go).
-	//
-	// Callers pass cleanOEM already normalized (NormalizeOEM: lowercase,
-	// no dashes/spaces/dots/slashes). We match against the SAME
-	// normalization applied to the raw column.
-	const q = `
+// probeGeneratedColumn detects whether the deployed MySQL instance has
+// the `articlecrosses.oemNumberNormalized` generated column created by
+// sql/06_articlecrosses_normalized_oem_index.sql. Runs once per process
+// and caches the result in r.hasNormalizedColumn.
+//
+// Uses a 2s context so a slow information_schema query on startup can't
+// hang the repo — a missing/unreachable schema simply falls back to the
+// slow path.
+func (r *sqlCrossRefRepo) probeGeneratedColumn() {
+	r.probeOnce.Do(func() {
+		if r.db == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		var n int
+		// COLUMN_NAME check works across MySQL 5.7 + 8.0; DATABASE() scopes
+		// to the current schema so we don't collide with tests / dev DBs.
+		err := r.db.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE()
+			  AND TABLE_NAME   = 'articlecrosses'
+			  AND COLUMN_NAME  = 'oemNumberNormalized'`).Scan(&n)
+		if err != nil {
+			log.Printf("[TecDocCrossRef] WARN: probeGeneratedColumn failed (%v) — falling back to slow full-scan query. Run sql/06_articlecrosses_normalized_oem_index.sql to enable the index.", err)
+			return
+		}
+		if n > 0 {
+			r.hasNormalizedColumn = true
+			log.Printf("[TecDocCrossRef] fast path enabled — articlecrosses.oemNumberNormalized is present + indexed")
+		} else {
+			log.Printf("[TecDocCrossRef] WARN: articlecrosses.oemNumberNormalized column is missing — falling back to slow full-scan query. Run sql/06_articlecrosses_normalized_oem_index.sql to enable the index (expected: 3-8 hours per query → <10ms per query).")
+		}
+	})
+}
+
+// crossRefSelectClause is the common SELECT + JOIN prefix used by both
+// QueryCrossRefs and QueryCrossRefsBatch. Kept as a const so the WHERE
+// clause is the only piece that varies between fast/slow paths.
+const crossRefSelectClause = `
 		SELECT
 			ac.oemNumber,
 			COALESCE(m.manuName, ''),
@@ -190,9 +241,27 @@ func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, l
 			COALESCE(m.manuName, '')
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
-		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
-		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) = ?
-		LIMIT ?`
+		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'`
+
+func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error) {
+	r.probeGeneratedColumn()
+
+	// FAST PATH: index on the generated column. Sub-10ms lookup on a
+	// 30M-row table.
+	//
+	// SLOW PATH: correctness fallback for deploys that haven't applied
+	// sql/06_articlecrosses_normalized_oem_index.sql yet. Same rows
+	// returned, but MySQL disables the index on `oemNumber` because the
+	// column is wrapped in LOWER(REPLACE(...)), forcing a full table
+	// scan. Empirically 3-8 hours per query on qa.ifritah.com's dataset.
+	var whereClause string
+	if r.hasNormalizedColumn {
+		whereClause = "WHERE ac.oemNumberNormalized = ?"
+	} else {
+		whereClause = "WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) = ?"
+	}
+
+	q := crossRefSelectClause + "\n\t\t" + whereClause + "\n\t\tLIMIT ?"
 
 	rows, err := logQueryCtx(r.db, ctx, "TecDocCrossRef.SearchCrossReferences", q, cleanOEM, limit)
 	if err != nil {
@@ -223,10 +292,17 @@ func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, l
 // Returns a map keyed by the cleaned OEM so callers can associate rows back
 // to their seed article without an N+1 loop. limitPerOEM is a soft cap that
 // bounds the whole result set to len(cleanOEMs) * limitPerOEM rows.
+//
+// See QueryCrossRefs for the fast/slow path story — same optimisation
+// applies here. Batch queries benefit even more from the indexed column
+// because MySQL can seek per input value instead of scanning once for the
+// whole IN list.
 func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []string, limitPerOEM int) (map[string][]crossRefRow, error) {
 	if len(cleanOEMs) == 0 {
 		return nil, nil
 	}
+	r.probeGeneratedColumn()
+
 	if limitPerOEM <= 0 || limitPerOEM > 100 {
 		limitPerOEM = 20
 	}
@@ -252,9 +328,21 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 		totalLimit = 2000
 	}
 
+	// The seed-OEM column comes first so callers can map rows back to
+	// their input. Fast path uses the indexed column directly; slow path
+	// re-normalises inline.
+	var seedCol, whereClause string
+	if r.hasNormalizedColumn {
+		seedCol = "ac.oemNumberNormalized"
+		whereClause = fmt.Sprintf("WHERE ac.oemNumberNormalized IN (%s)", placeholders)
+	} else {
+		seedCol = "LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', ''))"
+		whereClause = fmt.Sprintf("WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) IN (%s)", placeholders)
+	}
+
 	q := fmt.Sprintf(`
 		SELECT
-			LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) AS clean_oem,
+			%s AS clean_oem,
 			ac.oemNumber,
 			COALESCE(m.manuName, ''),
 			COALESCE(a.legacyArticleId, 0),
@@ -265,8 +353,8 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
 		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
-		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) IN (%s)
-		LIMIT %d`, placeholders, totalLimit)
+		%s
+		LIMIT %d`, seedCol, whereClause, totalLimit)
 
 	args := make([]any, 0, len(uniq))
 	for _, o := range uniq {
