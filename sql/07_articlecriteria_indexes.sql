@@ -1,0 +1,134 @@
+-- ============================================================================
+-- MySQL migration 07 — indexed articlecriteria for TecDoc spec queries
+-- ============================================================================
+-- Fixes the P0 slow-query bug found in the 2026-08-22 QA-lead audit
+-- (docs/reports/2026-08-22-post-pr18-enrichment-regression.md §3 RC-1):
+--
+--   TecDocSpecifications.FindSpecifications runs 17-36 SECONDS per call
+--   (avg 23.75s, max 36.23s across 64 calls in a 60s debug-log window).
+--
+-- Root cause: articlecriteria is 27M rows and the TecDoc-supplied dump
+-- ships with NO index on legacyArticleId or (criteriaDescription, rawValue).
+-- Grep of every .sql file in sql/ and db/migrations/ for "articlecriteria"
+-- returns zero matches — no migration ever touches this table. So every
+-- WHERE legacyArticleId = ? and every WHERE criteriaDescription = ? AND
+-- rawValue = ? runs a 27M-row full scan.
+--
+-- Debug-log evidence from qa.ifritah.com (2026-08-22, bundle 20:03 UTC):
+--
+--   SQL SLOW ⚠⚠  TecDocSpecifications.FindSpecifications: 18.576s
+--   SQL SLOW ⚠⚠  TecDocSpecifications.FindSpecifications: 18.567s
+--   SQL SLOW ⚠⚠  TecDocSpecifications.FindSpecifications: 18.558s
+--   … 64 similar entries in 60s, avg 23.75s, max 36.23s
+--   [SQL ERROR] TecDocSpecifications.FindBySpecMatch: ctx deadline
+--
+-- User-visible impact: every enrichment call for a real Hyundai/Kia OEM
+-- either blocks 17-36s or hits the browser 20s timeout — the whole
+-- reason a parts seller opens the app (aftermarket alternatives, specs,
+-- fitment) returns as empty arrays. 0/25 OEMs in the 2026-08-22 audit
+-- had any enrichment populated despite PR #17's promotion logic firing.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Four query patterns on articlecriteria, all indexless before this migration
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+-- (1) internal/service/tecdoc_specifications.go:82-92
+--       WHERE legacyArticleId = ?                       ── the 17-36s bug
+--
+-- (2) internal/service/tecdoc.go:434-439
+--       WHERE legacyArticleId = ?                       ── same shape, same slowness
+--
+-- (3) internal/service/strategy_spec_match.go:225-258
+--       WHERE criteriaDescription = ? AND rawValue = ?  ── hits ctx deadline
+--
+-- (4) internal/service/strategy_spec_match.go:305-312
+--       WHERE legacyArticleId = ? AND criteriaDescription = ? AND rawValue = ?
+--                                                       ── leftmost prefix of (1)
+--
+-- Two BTREE indexes cover all four:
+--
+--   * idx_articlecriteria_legacyArticleId (legacyArticleId)
+--       covers (1), (2), and (4) via leftmost-prefix rule.
+--       27M unique articles → BTREE selectivity ~1.0 → sub-10ms seek.
+--
+--   * idx_articlecriteria_criteria_value (criteriaDescription, rawValue)
+--       covers (3). criteriaDescription has bounded cardinality (~few
+--       hundred spec names); rawValue has high cardinality (thousands per
+--       spec). Compound gives full selectivity for the AND-of-equalities.
+--
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Migration properties
+-- ═══════════════════════════════════════════════════════════════════════════
+--
+--   * Data-preserving — pure DDL, adds indexes only, no column mutations.
+--   * MySQL 8.0+ ONLINE — non-blocking on the shipped Aiven managed instance.
+--     MySQL 5.7 would block writes ~3-8 min per index during the DDL.
+--   * Individually reversible — each index can be dropped independently.
+--   * Idempotent to migration failure — MySQL rejects duplicate index names
+--     with ERROR 1061 (Duplicate key name); no data corruption possible.
+--
+-- ROLLBACK:
+--
+--   ALTER TABLE articlecriteria DROP INDEX idx_articlecriteria_legacyArticleId;
+--   ALTER TABLE articlecriteria DROP INDEX idx_articlecriteria_criteria_value;
+--
+-- No Go code changes needed — the existing queries start using the new
+-- indexes automatically once MySQL picks them up (usually the next
+-- prepared-statement re-parse; force with FLUSH TABLES articlecriteria if
+-- needed).
+-- ============================================================================
+
+-- ── Index 1: covers WHERE legacyArticleId = ? (3 of 4 call sites) ──────────
+--
+-- Query planner will use this via leftmost-prefix for both single-column
+-- lookups and the (legacyArticleId, criteriaDescription, rawValue) compound
+-- filter in articleHasSpec.
+
+CREATE INDEX idx_articlecriteria_legacyArticleId
+  ON articlecriteria (legacyArticleId);
+
+-- ── Index 2: covers WHERE criteriaDescription = ? AND rawValue = ? ─────────
+--
+-- Compound index — order matters. criteriaDescription first because it has
+-- bounded cardinality (hundreds of distinct spec names) so equality against
+-- it prunes the tree aggressively before the rawValue tie-break.
+--
+-- Query planner will use this for FindBySpecMatch's "give me all articles
+-- with (thread_diameter, 12mm)" reverse-lookup pattern.
+
+CREATE INDEX idx_articlecriteria_criteria_value
+  ON articlecriteria (criteriaDescription, rawValue);
+
+-- ── Verification queries (advisory, no side effects) ───────────────────────
+-- Uncomment and run these AFTER the DDL completes to confirm the new
+-- indexes are healthy.
+--
+-- -- Confirm both indexes exist:
+-- SHOW INDEX FROM articlecriteria
+--   WHERE Key_name IN (
+--     'idx_articlecriteria_legacyArticleId',
+--     'idx_articlecriteria_criteria_value'
+--   );
+--
+-- -- Confirm the query planner uses idx_articlecriteria_legacyArticleId
+-- -- (expect: key='idx_articlecriteria_legacyArticleId', type='ref'):
+-- EXPLAIN
+--   SELECT criteriaDescription, rawValue, criteriaUnitDescription, criteriaType
+--   FROM articlecriteria
+--   WHERE legacyArticleId = 123456
+--   ORDER BY criteriaDescription
+--   LIMIT 200;
+--
+-- -- Confirm the query planner uses idx_articlecriteria_criteria_value
+-- -- (expect: key='idx_articlecriteria_criteria_value', type='ref'):
+-- EXPLAIN
+--   SELECT DISTINCT a.legacyArticleId, a.articleNumber
+--   FROM articlecriteria ac
+--   JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+--   WHERE ac.criteriaDescription = 'Thread Size'
+--     AND ac.rawValue = 'M20 x 1.5'
+--   LIMIT 10;
+--
+-- -- Sanity check: a known-good article id returns spec rows in <10 ms
+-- -- (contrast with the pre-migration 17-36s numbers logged in qa):
+-- SELECT COUNT(*) FROM articlecriteria WHERE legacyArticleId = 6103;
