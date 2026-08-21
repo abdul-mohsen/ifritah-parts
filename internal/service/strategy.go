@@ -170,8 +170,13 @@ func (s *SmartSearch) strategyForMode(mode string) SearchStrategy {
 
 // searchCombined fans out all available strategies in parallel, merges and
 // deduplicates results, and ranks by confidence × priority.
-// Hard budget: 3s; strategies that miss or err within that window are skipped.
-func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int) (*SmartSearchResponse, error) {
+// Hard budget: 12s; strategies that miss or err within that window are skipped.
+//
+// When progressCh is non-nil, emits one "start" event per strategy at dispatch
+// time (label = per-strategy human text) and one "done" event when the
+// strategy returns — so the SSE UI can render a live per-strategy checklist
+// instead of a single opaque "Running all strategies…" spinner.
+func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, progressCh chan<- ProgressEvent) (*SmartSearchResponse, error) {
 	req := StrategyRequest{
 		Query:           query,
 		LinkageTargetId: linkageTargetId,
@@ -219,6 +224,8 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
+	fanOutStart := time.Now()
+
 	type stratResult struct {
 		name     string
 		priority float64
@@ -231,6 +238,15 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		if s.circuitOpen(st.Name()) {
 			continue
 		}
+		// Emit "started" event so the UI shows this strategy as in-flight
+		// BEFORE the goroutine begins its (possibly slow) work.
+		send(progressCh, ProgressEvent{
+			Type:      "progress",
+			Step:      st.Name(),
+			Label:     labelForMode(st.Name()),
+			ElapsedMs: time.Since(fanOutStart).Milliseconds(),
+		})
+
 		wg.Add(1)
 		go func(strat SearchStrategy) {
 			defer wg.Done()
@@ -240,12 +256,33 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 			if err != nil {
 				log.Printf("[Combined] strategy=%s err=%v elapsed=%v", strat.Name(), err, elapsed)
 				s.recordStrategyFailure(strat.Name())
+				// Emit "done with 0 results" — user sees the strategy
+				// completed (with a fail count) rather than the row
+				// hanging in "running" state forever.
+				send(progressCh, ProgressEvent{
+					Type:      "progress",
+					Step:      strat.Name(),
+					Label:     labelForMode(strat.Name()),
+					ElapsedMs: time.Since(fanOutStart).Milliseconds(),
+					Done:      true,
+					Count:     0,
+				})
 				return
 			}
 			s.recordStrategySuccess(strat.Name())
 			for i := range res {
 				res[i].SourceStrategy = strat.Name()
 			}
+			// Emit "done with N results" so the UI can flip this
+			// strategy from spinner → check-with-count.
+			send(progressCh, ProgressEvent{
+				Type:      "progress",
+				Step:      strat.Name(),
+				Label:     labelForMode(strat.Name()),
+				ElapsedMs: time.Since(fanOutStart).Milliseconds(),
+				Done:      true,
+				Count:     len(res),
+			})
 			resultCh <- stratResult{name: strat.Name(), priority: strat.Priority(), results: res}
 		}(st)
 	}
