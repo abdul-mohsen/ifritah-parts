@@ -217,6 +217,10 @@ export default function OemSearch() {
     setOemResult(null);
 
     // Fire streaming search + OEM lookup in parallel.
+    // Default to `combined` (Smart Search) — the only mode that fans out all
+    // strategies in parallel AND emits per-strategy progress events so the
+    // SearchProgress UI can show live per-strategy status. Explicit modes
+    // (from the SearchModeSelector) override.
     const isOem = isLikelyOEM(trimmed);
     startSearch({
       q: trimmed,
@@ -224,7 +228,7 @@ export default function OemSearch() {
       ...(hasVehicleContext ? { linkageTargetId: vehicleId } : {}),
       ...(vehicleCC > 0 ? { vehicleCC } : {}),
       ...(fuelType ? { fuelType } : {}),
-      mode: searchMode || undefined,
+      mode: searchMode || 'combined',
       enrichmentLevel: 'basic',
     });
 

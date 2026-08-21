@@ -173,7 +173,7 @@ func (s *SmartSearch) SearchWithProgress(query string, linkageTargetId, vehicleC
 		done(resultCount)
 	} else if mode == "combined" {
 		done := progressStep(progressCh, start, "combined", "Running all strategies in parallel…")
-		resp, err = s.searchCombined(query, linkageTargetId, vehicleCC, fuelType, category, page, limit)
+		resp, err = s.searchCombined(query, linkageTargetId, vehicleCC, fuelType, category, page, limit, progressCh)
 		resultCount := 0
 		if resp != nil {
 			resultCount = resp.Total
@@ -223,13 +223,16 @@ func (s *SmartSearch) now() time.Time { return time.Now() }
 // labelForMode maps a strategy key to a human-readable progress label.
 func labelForMode(mode string) string {
 	labels := map[string]string{
-		"exact_oem":        "Checking OEM index…",
+		"cache":            "Checking OEM resolution cache…",
+		"legacy":           "Running legacy cascade (dealer + partsouq + supersession)…",
+		"exact_oem":        "Checking exact OEM index…",
 		"cross_reference":  "Querying TecDoc articlecrosses (30M rows)…",
 		"vehicle_fitment":  "Looking up vehicle-part linkages…",
 		"supersession":     "Walking supersession chain…",
 		"cross_brand":      "Checking cross-brand platform equivalents…",
 		"owned_catalog":    "Searching owned catalog…",
 		"keyword_gated":    "Running keyword search…",
+		"prefix_inference": "Inferring from OEM prefix + chassis code…",
 		"spec_match":       "Matching by physical specifications…",
 		"assembly_context": "Deriving sub-parts from assembly specs…",
 		"vin_assembly":     "Matching by vehicle engine & chassis specs…",
