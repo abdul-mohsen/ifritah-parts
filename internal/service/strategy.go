@@ -189,6 +189,51 @@ func (s *SmartSearch) searchCombined(query string, linkageTargetId, vehicleCC in
 		req.OEM = query
 	}
 
+	// ─── HK scope gate (moved here from searchByOEM in 2026-08-22 audit) ─
+	//
+	// Combined mode is the DEFAULT search path — the frontend defaults to
+	// mode="combined" (frontend/src/components/OemSearch.tsx). Before this
+	// gate was added, non-HK OEMs (Toyota 90915-YZZE1, BMW 11-42-7-521-353,
+	// Nissan 15208-9F600) bypassed the guard that existed only in
+	// searchByOEM (used by the older non-combined path). They fell through
+	// to the full strategy fan-out, ran every TecDoc query indexlessly,
+	// and hit the 20s browser timeout.
+	//
+	// Applying the gate at combined-mode entry:
+	//   * Rejects non-HK OEMs in <10ms with a helpful "Try Toyota parts
+	//     instead" message.
+	//   * Frees TecDoc query budget for real HK searches.
+	//   * Preserves partial-OEM-stem behaviour (format="unknown" AND no
+	//     SuggestedMake means the guard passes — same predicate as
+	//     searchByOEM after the same-day fix).
+	if req.OEM != "" {
+		scope := IsHKOEM(req.OEM)
+		if !scope.IsHK && (scope.Format != "unknown" || scope.SuggestedMake != "") {
+			log.Printf("[searchCombined] REJECTED by HK-scope gate: %s", scope.Reason)
+			resp := &SmartSearchResponse{
+				Query:          query,
+				SearchStrategy: "hk_scope_rejected",
+				Warnings:       []string{scope.Reason},
+				Total:          0,
+			}
+			if scope.SuggestedMake != "" {
+				resp.Warnings = append(resp.Warnings,
+					"Try the parts distributor for "+scope.SuggestedMake+" instead.")
+			}
+			// Still emit a "done" event so the SSE UI unblocks its spinner
+			// immediately instead of waiting for the ctx timeout.
+			send(progressCh, ProgressEvent{
+				Type:      "progress",
+				Step:      "hk_scope_rejected",
+				Label:     "Not a Hyundai/Kia OEM",
+				ElapsedMs: 0,
+				Done:      true,
+				Count:     0,
+			})
+			return resp, nil
+		}
+	}
+
 	strategies := []SearchStrategy{
 		&CacheStrategy{search: s},
 		&LegacyCascadeStrategy{search: s},
@@ -480,9 +525,9 @@ func (s *SmartSearch) recordStrategySuccess(name string) {
 // ExactOEMStrategy wraps the Postgres oem_search_index + TecDoc oem_number path.
 type ExactOEMStrategy struct{ search *SmartSearch }
 
-func (st *ExactOEMStrategy) Name() string          { return "exact_oem" }
+func (st *ExactOEMStrategy) Name() string            { return "exact_oem" }
 func (st *ExactOEMStrategy) ConfidenceBase() float64 { return 0.95 }
-func (st *ExactOEMStrategy) Priority() float64      { return 1.0 }
+func (st *ExactOEMStrategy) Priority() float64       { return 1.0 }
 func (st *ExactOEMStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
 	if req.OEM == "" {
 		return nil, nil
@@ -497,9 +542,9 @@ func (st *ExactOEMStrategy) Search(ctx context.Context, req StrategyRequest) ([]
 // CrossReferenceStrategy uses TecDoc articlecrosses (30M rows).
 type CrossReferenceStrategy struct{ search *SmartSearch }
 
-func (st *CrossReferenceStrategy) Name() string          { return "cross_reference" }
+func (st *CrossReferenceStrategy) Name() string            { return "cross_reference" }
 func (st *CrossReferenceStrategy) ConfidenceBase() float64 { return 0.92 }
-func (st *CrossReferenceStrategy) Priority() float64      { return 0.9 }
+func (st *CrossReferenceStrategy) Priority() float64       { return 0.9 }
 func (st *CrossReferenceStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
 	if req.OEM == "" || st.search.tecDocCrossRef == nil {
 		return nil, nil
@@ -532,9 +577,9 @@ func (st *CrossReferenceStrategy) Search(ctx context.Context, req StrategyReques
 // VehicleFitmentStrategy uses articlesvehicletrees via searchByVehicle.
 type VehicleFitmentStrategy struct{ search *SmartSearch }
 
-func (st *VehicleFitmentStrategy) Name() string          { return "vehicle_fitment" }
+func (st *VehicleFitmentStrategy) Name() string            { return "vehicle_fitment" }
 func (st *VehicleFitmentStrategy) ConfidenceBase() float64 { return 0.98 }
-func (st *VehicleFitmentStrategy) Priority() float64      { return 0.9 }
+func (st *VehicleFitmentStrategy) Priority() float64       { return 0.9 }
 func (st *VehicleFitmentStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
 	if req.LinkageTargetId <= 0 {
 		return nil, nil
@@ -549,9 +594,9 @@ func (st *VehicleFitmentStrategy) Search(ctx context.Context, req StrategyReques
 // SupersessionStrategy walks the replacement chain and returns the current/successor parts.
 type SupersessionStrategy struct{ search *SmartSearch }
 
-func (st *SupersessionStrategy) Name() string          { return "supersession" }
+func (st *SupersessionStrategy) Name() string            { return "supersession" }
 func (st *SupersessionStrategy) ConfidenceBase() float64 { return 0.85 }
-func (st *SupersessionStrategy) Priority() float64      { return 0.85 }
+func (st *SupersessionStrategy) Priority() float64       { return 0.85 }
 func (st *SupersessionStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
 	if req.OEM == "" || st.search.tecDocSuper == nil {
 		return nil, nil
@@ -597,9 +642,9 @@ func (st *SupersessionStrategy) Search(ctx context.Context, req StrategyRequest)
 // CrossBrandStrategy uses FindCrossBrandEquivalents for Hyundai ↔ Kia sharing.
 type CrossBrandStrategy struct{ search *SmartSearch }
 
-func (st *CrossBrandStrategy) Name() string          { return "cross_brand" }
+func (st *CrossBrandStrategy) Name() string            { return "cross_brand" }
 func (st *CrossBrandStrategy) ConfidenceBase() float64 { return 0.85 }
-func (st *CrossBrandStrategy) Priority() float64      { return 0.75 }
+func (st *CrossBrandStrategy) Priority() float64       { return 0.75 }
 func (st *CrossBrandStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
 	if req.OEM == "" {
 		return nil, nil
@@ -639,7 +684,7 @@ func (st *CrossBrandStrategy) Search(ctx context.Context, req StrategyRequest) (
 // owned catalog and want a fast lookup without cross-ref noise.
 type OwnedCatalogStrategy struct{ search *SmartSearch }
 
-func (st *OwnedCatalogStrategy) Name() string           { return "owned_catalog" }
+func (st *OwnedCatalogStrategy) Name() string            { return "owned_catalog" }
 func (st *OwnedCatalogStrategy) ConfidenceBase() float64 { return 0.98 }
 func (st *OwnedCatalogStrategy) Priority() float64       { return 0.90 }
 func (st *OwnedCatalogStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
@@ -658,11 +703,11 @@ func (st *OwnedCatalogStrategy) Search(ctx context.Context, req StrategyRequest)
 	for _, p := range parts {
 		rule := ClassifyCategory(p.Description)
 		results = append(results, SmartResult{
-			Part:          p,
-			Confidence:    0.98,
+			Part:           p,
+			Confidence:     0.98,
 			ConfidenceNote: "Owned catalog exact match",
-			FitmentDriver: driverName(rule.Driver),
-			BrandResolved: p.BrandName,
+			FitmentDriver:  driverName(rule.Driver),
+			BrandResolved:  p.BrandName,
 		})
 	}
 	return results, nil
@@ -677,7 +722,7 @@ func (st *OwnedCatalogStrategy) Search(ctx context.Context, req StrategyRequest)
 // junk like "strut mounting" for "oil filter" queries.
 type KeywordGatedStrategy struct{ search *SmartSearch }
 
-func (st *KeywordGatedStrategy) Name() string           { return "keyword_gated" }
+func (st *KeywordGatedStrategy) Name() string            { return "keyword_gated" }
 func (st *KeywordGatedStrategy) ConfidenceBase() float64 { return 0.65 }
 func (st *KeywordGatedStrategy) Priority() float64       { return 0.50 }
 func (st *KeywordGatedStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
@@ -724,7 +769,6 @@ func (st *KeywordGatedStrategy) Search(ctx context.Context, req StrategyRequest)
 	}
 	return results, nil
 }
-
 
 // isMostlyDigits returns true when 70%+ of the input characters are digits.
 // Used as a guard on keyword search to prevent OEM-shaped queries (which are
@@ -785,7 +829,6 @@ func (st *LegacyCascadeStrategy) Search(ctx context.Context, req StrategyRequest
 	return resp.Results, nil
 }
 
-
 // PrefixInferenceStrategy synthesizes a description for the OEM by
 // decomposing it into (5-digit part-family prefix, 2-char chassis code,
 // 3-char variant suffix) and joining each against the Postgres lookup
@@ -823,7 +866,6 @@ func (st *PrefixInferenceStrategy) Search(ctx context.Context, req StrategyReque
 	}
 	return []SmartResult{*result}, nil
 }
-
 
 // CacheStrategy hits the Phase-2 persistent Postgres oem_resolution_cache
 // (populated by StoreResultAsync after any successful strategy return).
