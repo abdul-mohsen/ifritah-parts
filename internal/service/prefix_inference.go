@@ -55,8 +55,21 @@ var hkOEMPartRegex = regexp.MustCompile(`^([0-9]{5})[- ]?([A-Z0-9]{5})$`)
 // prefix data is available for it.
 //
 // Never touches the network. Bounded runtime ~5 ms (three PK lookups).
+//
+// Guards against non-HK OEMs (Toyota, Honda, BMW, Nissan) via IsHKOEM —
+// their 5+5-shaped part numbers otherwise pass the format regex and would
+// synthesize plausible-looking-but-wrong descriptions. The audit at
+// docs/reports/2026-08-19-post-pr14-data-quality.md §4 measured 27
+// false positives on 100 non-HK OEMs before this guard was added.
 func (p *PrefixInference) Synthesize(ctx context.Context, rawOEM string) *SmartResult {
 	if p == nil || p.db == nil {
+		return nil
+	}
+	// Hard HK-scope gate first — rejects Toyota (90915-YZZE1), Honda
+	// (17220-RNA-A00), BMW (11-42-7-521-353), Nissan (15208-9F600), and
+	// anything whose format looks HK-shaped but whose 2-3-digit prefix is
+	// not in the HK catalog. Sub-microsecond regex + prefix lookup.
+	if !IsHKOEM(rawOEM).IsHK {
 		return nil
 	}
 	upper := strings.ToUpper(strings.TrimSpace(rawOEM))

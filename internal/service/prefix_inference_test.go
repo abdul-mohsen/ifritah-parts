@@ -237,3 +237,33 @@ func indexOf(s, substr string) int {
 	}
 	return -1
 }
+
+
+// TestPrefixInference_RejectsNonHKOEMs verifies the IsHKOEM guard added
+// 2026-08-20 kills FPs on non-HK OEMs whose format happens to match the
+// HK 5+5 pattern. Audit at docs/reports/2026-08-19-post-pr14-data-quality.md
+// §4 measured 27 false positives on 100 non-HK OEMs before the guard.
+func TestPrefixInference_RejectsNonHKOEMs(t *testing.T) {
+	db := setupPrefixInferenceTestDB(t)
+	pi := NewPrefixInference(db)
+
+	nonHKCases := []struct {
+		oem  string
+		note string
+	}{
+		{"90915-YZZE1", "Toyota oil filter — 909 not in HK prefix map, in Toyota deny-list"},
+		{"90915-YZZD3", "Toyota oil filter (variant)"},
+		{"17220-RNA-A00", "Honda air filter — 3-part format, not HK-shape at all"},
+		{"15208-9F600", "Nissan oil filter — 152 in Nissan deny-list"},
+		{"22448-1KT0A", "Nissan ignition coil — 224 in Nissan deny-list"},
+		{"11-42-7-521-353", "BMW multi-dash format"},
+		{"48619-30040", "Toyota strut bearing — HK-shape but non-HK prefix"},
+		{"AL3Z-6584-A", "Ford — starts with alpha, format regex rejects"},
+	}
+	for _, tc := range nonHKCases {
+		if r := pi.Synthesize(context.Background(), tc.oem); r != nil {
+			t.Errorf("Synthesize(%q) returned %v — %s. Expected nil (IsHKOEM guard should reject).",
+				tc.oem, r.Description, tc.note)
+		}
+	}
+}
