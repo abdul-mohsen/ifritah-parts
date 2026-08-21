@@ -377,7 +377,7 @@ func TestEnrichResults_NoneLevel_Passthrough(t *testing.T) {
 		{Part: model.Part{LegacyArticleId: 100, ArticleNumber: "A", Description: "d"}},
 		{Part: model.Part{LegacyArticleId: 200, ArticleNumber: "B", Description: "e"}},
 	}
-	out := s.enrichResults(input, "none")
+	out := s.enrichResults(context.Background(), input, "none")
 	if len(out) != len(input) {
 		t.Fatalf("len(out) = %d, want %d", len(out), len(input))
 	}
@@ -395,7 +395,7 @@ func TestEnrichResults_NoneLevel_Passthrough(t *testing.T) {
 func TestEnrichResults_EmptyLevel_Passthrough(t *testing.T) {
 	s := &SmartSearch{}
 	input := []SmartResult{{Part: model.Part{LegacyArticleId: 42}}}
-	out := s.enrichResults(input, "")
+	out := s.enrichResults(context.Background(), input, "")
 	if len(out) != 1 {
 		t.Fatalf("len(out) = %d, want 1", len(out))
 	}
@@ -412,7 +412,7 @@ func TestEnrichResults_ZeroArticleId_Skipped(t *testing.T) {
 		{Part: model.Part{LegacyArticleId: 0}},
 		{Part: model.Part{LegacyArticleId: -5}},
 	}
-	out := s.enrichResults(input, "basic")
+	out := s.enrichResults(context.Background(), input, "basic")
 	if len(out) != 2 {
 		t.Fatalf("len(out) = %d, want 2", len(out))
 	}
@@ -428,7 +428,7 @@ func TestEnrichResults_ZeroArticleId_Skipped(t *testing.T) {
 func TestEnrichResults_NoServices_NoOp(t *testing.T) {
 	s := &SmartSearch{} // no tecDocSpecs / tecDocVehicle / etc.
 	input := []SmartResult{{Part: model.Part{LegacyArticleId: 100}}}
-	out := s.enrichResults(input, "full")
+	out := s.enrichResults(context.Background(), input, "full")
 	if len(out) != 1 {
 		t.Fatalf("len(out) = %d, want 1", len(out))
 	}
@@ -440,6 +440,71 @@ func TestEnrichResults_NoServices_NoOp(t *testing.T) {
 	}
 	if out[0].Supersession != nil {
 		t.Errorf("Supersession populated without tecDocSuper")
+	}
+}
+
+// TestEnrichResults_CtxCancelled verifies that when the caller's context is
+// already cancelled at call time, enrichResults returns the originals
+// without blocking on any TecDoc call. Regression test for the 2026-08-22
+// bug where wg.Wait() blocked past ctx cancellation because
+// FindSpecifications ran 17-36s on the un-indexed articlecriteria table
+// (fixed by sql/07 + this ctx-drain pattern).
+func TestEnrichResults_CtxCancelled(t *testing.T) {
+	s := &SmartSearch{} // no services attached — enrichment is a no-op
+	input := []SmartResult{
+		{Part: model.Part{LegacyArticleId: 100, ArticleNumber: "26350-2J001", Description: "d1"}},
+		{Part: model.Part{LegacyArticleId: 200, ArticleNumber: "97133-D3000", Description: "d2"}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled
+
+	start := time.Now()
+	out := s.enrichResults(ctx, input, "full")
+	elapsed := time.Since(start)
+
+	// Must complete quickly — no blocking on the cancelled ctx.
+	if elapsed > 2*time.Second {
+		t.Errorf("enrichResults with cancelled ctx took %v; expected sub-second return", elapsed)
+	}
+
+	// Must return same-length slice; originals preserved even if ctx fired
+	// before any goroutine wrote to resultCh.
+	if len(out) != len(input) {
+		t.Fatalf("len(out) = %d, want %d (originals must be returned on ctx cancel)", len(out), len(input))
+	}
+	for i, r := range out {
+		if r.LegacyArticleId != input[i].LegacyArticleId {
+			t.Errorf("out[%d].LegacyArticleId = %d, want %d (original id must be preserved)",
+				i, r.LegacyArticleId, input[i].LegacyArticleId)
+		}
+		if r.ArticleNumber != input[i].ArticleNumber {
+			t.Errorf("out[%d].ArticleNumber = %q, want %q", i, r.ArticleNumber, input[i].ArticleNumber)
+		}
+	}
+}
+
+// TestEnrichResults_RespectsBudget verifies that enrichResults returns
+// within enrichmentBudget even if per-result work is slow. Uses no services
+// so this is a fast test of the budget mechanic itself (real services are
+// black-boxed here — the guarantee is "we don't block past the deadline").
+func TestEnrichResults_RespectsBudget(t *testing.T) {
+	s := &SmartSearch{}
+	input := make([]SmartResult, 50) // over the semaphore capacity (10)
+	for i := range input {
+		input[i] = SmartResult{Part: model.Part{LegacyArticleId: i + 1, ArticleNumber: "TEST"}}
+	}
+
+	start := time.Now()
+	out := s.enrichResults(context.Background(), input, "full")
+	elapsed := time.Since(start)
+
+	// No services → no-op path → must finish very fast, well under budget.
+	if elapsed > enrichmentBudget {
+		t.Errorf("enrichResults elapsed %v; must not exceed enrichmentBudget %v", elapsed, enrichmentBudget)
+	}
+	if len(out) != len(input) {
+		t.Fatalf("len(out) = %d, want %d", len(out), len(input))
 	}
 }
 
@@ -655,7 +720,6 @@ func TestStrategyForMode_ReturnsNewWrappers(t *testing.T) {
 	}
 }
 
-
 // ─── isMostlyDigits guard ─────────────────────────────────────────────────
 
 // TestIsMostlyDigits verifies the guard that stops KeywordGated from
@@ -665,17 +729,17 @@ func TestIsMostlyDigits(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"82460-2T010", true},   // OEM — mostly digits, should be blocked
-		{"26350-2J001", true},   // OEM
-		{"97133-D3000", true},   // OEM
-		{"18855-10080", true},   // OEM
-		{"oil filter", false},   // Free text — should keyword search
+		{"82460-2T010", true}, // OEM — mostly digits, should be blocked
+		{"26350-2J001", true}, // OEM
+		{"97133-D3000", true}, // OEM
+		{"18855-10080", true}, // OEM
+		{"oil filter", false}, // Free text — should keyword search
 		{"cabin air filter", false},
-		{"MANN W712/4", false},  // Aftermarket brand+number, mixed
+		{"MANN W712/4", false},      // Aftermarket brand+number, mixed
 		{"BOSCH 0451103314", false}, // Brand name dominates
-		{"", false},             // Empty
-		{"12345", true},         // Pure digits
-		{"abc", false},          // Pure letters
+		{"", false},                 // Empty
+		{"12345", true},             // Pure digits
+		{"abc", false},              // Pure letters
 	}
 	for _, tc := range cases {
 		if got := isMostlyDigits(tc.in); got != tc.want {

@@ -201,7 +201,13 @@ func (s *SmartSearch) SearchWithProgress(query string, linkageTargetId, vehicleC
 
 		if enrichmentLevel != "none" && len(resp.Results) > 0 {
 			done := progressStep(progressCh, start, "enrichment", fmt.Sprintf("Enriching %d results…", len(resp.Results)))
-			resp.Results = s.enrichResults(resp.Results, enrichmentLevel)
+			// context.Background() is the right ctx here: SearchWithProgress
+			// itself is not ctx-driven (it's called synchronously from an
+			// HTTP handler). enrichResults installs its own enrichmentBudget
+			// deadline on top of whatever ctx is passed in. When the HTTP
+			// handler is ctx-driven in a future refactor, pass its ctx here
+			// so client aborts propagate down.
+			resp.Results = s.enrichResults(context.Background(), resp.Results, enrichmentLevel)
 			done(len(resp.Results))
 		}
 	}
@@ -351,11 +357,21 @@ func (s *SmartSearch) searchByOEM(oemNum string, linkageTargetId, vehicleCC int,
 	// HK-scoped data anyway), so a valid HK OEM disguised in a weird
 	// format still gets a chance via the seeded corpus below.
 	scope := IsHKOEM(oemNum)
-	// Only gate when the OEM number has a recognisable HK format (dashed or flat)
-	// but the prefix belongs to another make (Toyota, BMW, etc.).
-	// Do NOT gate partial OEM stems (e.g. "97133" without the "-D3000" suffix) —
-	// those are format="unknown" and may still be in our seeded catalog.
-	if scope.Format != "unknown" && !scope.IsHK {
+	// Reject when either:
+	//   (a) the OEM format is recognisable (dashed or flat 5-5) but the
+	//       prefix belongs to another make (e.g. 90915-YZZE1 Toyota),
+	//   (b) OR the deny-list matched a specific non-HK make regardless
+	//       of format (e.g. 11-42-7-521-353 BMW has 4 dashes and fails
+	//       every regex, but nonHKMakeHints["11427"] matches → scope
+	//       returns SuggestedMake="BMW"). Before this fix the gate only
+	//       fired on (a), so multi-dash / weird-format non-HK OEMs
+	//       leaked into the cascade and hit the 20s browser timeout
+	//       instead of rejecting instantly.
+	//
+	// We still do NOT gate partial OEM stems (e.g. "97133" without the
+	// "-D3000" suffix) — those are format="unknown" AND have no
+	// SuggestedMake, so the guard passes.
+	if !scope.IsHK && (scope.Format != "unknown" || scope.SuggestedMake != "") {
 		log.Printf("[SmartSearch.searchByOEM] REJECTED by HK-scope gate: %s", scope.Reason)
 		resp.SearchStrategy = "hk_scope_rejected"
 		resp.Warnings = append(resp.Warnings, scope.Reason)
