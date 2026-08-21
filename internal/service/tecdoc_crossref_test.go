@@ -295,3 +295,56 @@ func TestCrossRefSQL_NoBrokenColumnReference(t *testing.T) {
 		}
 	}
 }
+
+
+// TestCrossRef_UsesIndexedColumn verifies both queries hit the indexed
+// generated column oemNumberNormalized. The migration
+// sql/06_articlecrosses_normalized_oem_index.sql creates the column;
+// this test guards against a regression that reverts to the LOWER(REPLACE(...))
+// full-scan pattern (which caused 3-8 HOUR queries on qa.ifritah.com per
+// docs/reports/2026-08-19-post-pr14-data-quality.md).
+func TestCrossRef_UsesIndexedColumn(t *testing.T) {
+	content, err := os.ReadFile("tecdoc_crossref.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	src := string(content)
+
+	// Must reference the indexed column in both single + batch queries.
+	if !strings.Contains(src, "ac.oemNumberNormalized = ?") {
+		t.Error("tecdoc_crossref.go must use WHERE ac.oemNumberNormalized = ? (indexed generated column). See sql/06_articlecrosses_normalized_oem_index.sql.")
+	}
+	if !strings.Contains(src, "ac.oemNumberNormalized IN (") {
+		t.Error("tecdoc_crossref.go batch query must use ac.oemNumberNormalized IN (...) — the indexed column.")
+	}
+
+	// Must NOT re-introduce the function-on-column slow pattern in the SQL text
+	// (comments + documentation are allowed to reference it as historical context).
+	lines := strings.Split(src, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if strings.Contains(line, "LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber") {
+			t.Errorf("tecdoc_crossref.go:%d - slow function-on-column pattern reintroduced; use ac.oemNumberNormalized (indexed) instead. See migration sql/06_articlecrosses_normalized_oem_index.sql.", i+1)
+		}
+	}
+}
+
+// TestCrossRef_SchemaMigrationReferenced verifies the SQL migration file
+// exists and the Go source references it in a comment. Guards against
+// the pair drifting out of sync.
+func TestCrossRef_SchemaMigrationReferenced(t *testing.T) {
+	migrationPath := "../../sql/06_articlecrosses_normalized_oem_index.sql"
+	if _, err := os.Stat(migrationPath); err != nil {
+		t.Fatalf("MySQL migration file %s missing: %v", migrationPath, err)
+	}
+	content, err := os.ReadFile("tecdoc_crossref.go")
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	if !strings.Contains(string(content), "06_articlecrosses_normalized_oem_index.sql") {
+		t.Error("tecdoc_crossref.go should reference sql/06_articlecrosses_normalized_oem_index.sql so operators can find the migration from the codebase")
+	}
+}

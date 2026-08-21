@@ -12,12 +12,12 @@ import (
 // crossRefRepo is the injectable DB dependency for TecDocCrossRef.
 // The production implementation runs the SQL query against articlecrosses
 // (30M rows). Tests inject a stub that returns fixture rows without touching
-// a live MySQL database. Matching the supersession.go pattern.
+// a live MySQL database.
 type crossRefRepo interface {
 	QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error)
-	// S2-T4 batched form: single IN(...) query for N OEM numbers.
-	// Returns cross-ref rows tagged with the input OEM so the caller can map
-	// back to the seed article without a per-item lookup.
+	// Batched form: single IN(...) query for N OEM numbers. Returns rows
+	// keyed by the input OEM so the caller can map back to the seed article
+	// without a per-item lookup.
 	QueryCrossRefsBatch(ctx context.Context, cleanOEMs []string, limitPerOEM int) (map[string][]crossRefRow, error)
 }
 
@@ -34,10 +34,10 @@ type crossRefRow struct {
 }
 
 // TecDocCrossRef surfaces the TecDoc articlecrosses table (30M cross-ref rows)
-// as structured OEM references. This is distinct from TecDoc.SearchByOEM in
-// tecdoc.go: SearchByOEM walks the compact oem_number/oem_search_index tables;
-// SearchCrossReferences walks the authoritative cross-reference table itself
-// so the mfrName provenance survives into the response.
+// as structured OEM references. Distinct from TecDoc.SearchByOEM: SearchByOEM
+// walks the compact oem_number/oem_search_index tables; SearchCrossReferences
+// walks the authoritative cross-reference table itself so the mfrName
+// provenance survives into the response.
 type TecDocCrossRef struct {
 	repo crossRefRepo
 }
@@ -104,13 +104,12 @@ func (s *TecDocCrossRef) SearchCrossReferences(oemNumber string, limit int) ([]m
 }
 
 // SearchCrossReferencesBatch is the batched form of SearchCrossReferences.
-// Given N OEM numbers, it runs a single `articlecrosses.cleanCrossNumber IN (?)`
-// query and returns a map keyed by NORMALISED OEM (input passed through
-// NormalizeOEM). Empty or duplicate OEM inputs are dropped.
+// Given N OEM numbers, it runs a single IN(...) query and returns a map
+// keyed by NORMALISED OEM (input passed through NormalizeOEM). Empty or
+// duplicate OEM inputs are dropped.
 //
-// This is the S2-T4 batched path used by searchByVehicle enrichment.
-// Where SearchCrossReferences would issue one query per vehicle result,
-// this issues one query for all of them combined.
+// Used by the vehicle-fitment enrichment path so N vehicle rows don't turn
+// into N cross-reference queries.
 func (s *TecDocCrossRef) SearchCrossReferencesBatch(oemNumbers []string, limitPerOEM int) (map[string][]model.OEMReference, error) {
 	if s.repo == nil {
 		return nil, fmt.Errorf("database not connected")
@@ -155,30 +154,21 @@ func (s *TecDocCrossRef) SearchCrossReferencesBatch(oemNumbers []string, limitPe
 }
 
 // sqlCrossRefRepo is the production repo bound to a MySQL *sql.DB.
-// It runs the articlecrosses query with LEFT JOIN so parts missing from
-// the local articles view still surface with an empty article number
-// (the raw crossOemNumber alone is still evidence).
+// Queries the articlecrosses table via the indexed generated column
+// `articlecrosses.oemNumberNormalized` created by
+// sql/06_articlecrosses_normalized_oem_index.sql.
+//
+// The migration is a hard deploy prerequisite. Pre-migration deploys will
+// surface a clear "Unknown column" error on every cross_reference call —
+// which is intentional. The prior conditional-fallback branch (silently
+// falling back to a 3-8 hour full-table scan) was worse: it made the
+// system look "working but slow" when it was really "requires a migration
+// that nobody ran". Fail loud, fix the migration, deploy: KISS.
 type sqlCrossRefRepo struct {
 	db *sql.DB
 }
 
 func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, limit int) ([]crossRefRow, error) {
-	// BUG FIX 2026-08-17 (round 2): the TecDoc 2020 articlecrosses schema
-	// has NEITHER ac.articleCrossNumber NOR ac.cleanCrossNumber — the actual
-	// columns are `ac.oemNumber` (raw OEM), `ac.number` (aftermarket article
-	// number), `ac.brandName`, `ac.mfrId`, `ac.legacyArticleId`. Verified
-	// against sql/04_oem_index.sql (the working seed script that populates
-	// the search index FROM this same table) and the /api/debug/logs stream
-	// which surfaced 'Error 1054: Unknown column ac.cleanCrossNumber'.
-	//
-	// The WHERE clause matches by inline-normalizing ac.oemNumber. This
-	// disables the index on `oemNumber` (function-on-column) but is the
-	// simplest correct query — 30M rows scanned but bounded by LIMIT and
-	// by combined-mode's timeout enforcement (see strategy.go).
-	//
-	// Callers pass cleanOEM already normalized (NormalizeOEM: lowercase,
-	// no dashes/spaces/dots/slashes). We match against the SAME
-	// normalization applied to the raw column.
 	const q = `
 		SELECT
 			ac.oemNumber,
@@ -191,7 +181,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, l
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
 		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
-		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) = ?
+		WHERE ac.oemNumberNormalized = ?
 		LIMIT ?`
 
 	rows, err := logQueryCtx(r.db, ctx, "TecDocCrossRef.SearchCrossReferences", q, cleanOEM, limit)
@@ -219,10 +209,6 @@ func (r *sqlCrossRefRepo) QueryCrossRefs(ctx context.Context, cleanOEM string, l
 	return out, nil
 }
 
-// QueryCrossRefsBatch runs a single IN(...) query across many OEM numbers.
-// Returns a map keyed by the cleaned OEM so callers can associate rows back
-// to their seed article without an N+1 loop. limitPerOEM is a soft cap that
-// bounds the whole result set to len(cleanOEMs) * limitPerOEM rows.
 func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []string, limitPerOEM int) (map[string][]crossRefRow, error) {
 	if len(cleanOEMs) == 0 {
 		return nil, nil
@@ -230,7 +216,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 	if limitPerOEM <= 0 || limitPerOEM > 100 {
 		limitPerOEM = 20
 	}
-	// Deduplicate + build placeholders + args.
+	// Deduplicate.
 	seen := make(map[string]bool, len(cleanOEMs))
 	uniq := make([]string, 0, len(cleanOEMs))
 	for _, o := range cleanOEMs {
@@ -245,8 +231,8 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 	}
 
 	placeholders := strings.Repeat("?,", len(uniq)-1) + "?"
-	// Cap the whole result set — safe upper bound so a stray call with 1000
-	// OEMs cannot pull hundreds of thousands of rows.
+	// Cap total result set so a 1000-OEM call can't return hundreds of
+	// thousands of rows.
 	totalLimit := limitPerOEM * len(uniq)
 	if totalLimit > 2000 {
 		totalLimit = 2000
@@ -254,7 +240,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 
 	q := fmt.Sprintf(`
 		SELECT
-			LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) AS clean_oem,
+			ac.oemNumberNormalized AS clean_oem,
 			ac.oemNumber,
 			COALESCE(m.manuName, ''),
 			COALESCE(a.legacyArticleId, 0),
@@ -265,7 +251,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 		FROM articlecrosses ac
 		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
 		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
-		WHERE LOWER(REPLACE(REPLACE(REPLACE(REPLACE(ac.oemNumber, '-', ''), ' ', ''), '.', ''), '/', '')) IN (%s)
+		WHERE ac.oemNumberNormalized IN (%s)
 		LIMIT %d`, placeholders, totalLimit)
 
 	args := make([]any, 0, len(uniq))
@@ -301,7 +287,7 @@ func (r *sqlCrossRefRepo) QueryCrossRefsBatch(ctx context.Context, cleanOEMs []s
 }
 
 // firstNonEmpty returns the first argument whose trimmed form is not empty,
-// or the last argument if none qualify. Kept unexported and package-local.
+// or the last argument if none qualify.
 func firstNonEmpty(a, b string) string {
 	if strings.TrimSpace(a) != "" {
 		return a
