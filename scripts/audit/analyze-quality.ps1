@@ -1,23 +1,30 @@
 # analyze-quality.ps1 - Search-engine quality analyzer
 #
-# Reads the raw CSV from audit-quality.ps1, emits FOUR dated output files:
+# Reads the raw CSV from audit-quality.ps1, emits FIVE dated output files
+# and computes FOUR layered F1 metrics per group:
 #
-#   qa-quality-by-category-<date>.csv - one row per ExpectedCategory, ALL of them
-#   qa-quality-by-system-<date>.csv   - one row per ExpectedSystem
-#   qa-quality-by-slice-<date>.csv    - one row per corpus slice
-#   qa-quality-failures-<date>.csv    - every OEM that failed, with reason
-#   qa-quality-summary-<date>.txt     - human-readable overview
+#   F1_hit    = returned any result (basic recall)
+#   F1_part   = returned result + description matches ExpectedCategory
+#               tokens (correct part identification)
+#   F1_repl   = returned result + at least one replacement (aftermarket
+#               brand OR TecDoc OEM cross-reference OR supersession chain)
+#   F1_full   = returned CORRECT part AND at least one replacement.
+#               This is the "app fulfills its promise" metric a parts
+#               seller cares about - they need the OEM identified AND
+#               at least one alternative sourcing option.
 #
-# Classification per row (GroundTruth-aware):
-#   TP  - exists row + hit + description contains >=2 GoodTokens
-#   FPc - exists row + hit + description missed GoodTokens (wrong category)
-#   FPe - not_hk_format row returned results (should have been empty)
-#   FPn - non_hk row returned results (guard leak - critical)
-#   FN  - exists row returned zero results (missed real part)
-#   TN  - non-existent OEM returned zero results (correct rejection)
+# Layered outputs so you can see WHERE the quality gap is: identify part
+# vs find replacement vs both. Target for F1_full is >= 0.95 on
+# replaceable-parts categories (filters, brakes, shocks, etc.). Body /
+# glass / accessory categories have a lower structural ceiling because
+# TecDoc has zero aftermarket data for them - track F1_part on those.
 #
-# Also reports enrichment coverage per group:
-#   Aftermarket%, Specs%, Vehicles%, Supersession%, OEMNumbers%
+# Outputs (all dated yyyy-MM-dd_HHmm):
+#   qa-quality-by-category-<date>.csv   - ALL categories, all four F1s
+#   qa-quality-by-system-<date>.csv     - per ExpectedSystem
+#   qa-quality-by-slice-<date>.csv      - per corpus slice
+#   qa-quality-failures-<date>.csv      - every failing OEM with reason
+#   qa-quality-summary-<date>.txt       - human-readable overview
 
 param(
   [Parameter(Mandatory=$true)]
@@ -59,32 +66,55 @@ function Test-Tokens($desc, $goodTokens, $minMatch) {
   return $matches -ge [Math]::Min($minMatch, $tokens.Count)
 }
 
-# Classify every row
+# Classify every row against ALL FOUR metrics
 $classified = $rows | ForEach-Object {
   $r = $_
-  $hit = [int]$r.Total -gt 0
-  $tokensOK = Test-Tokens $r.FirstDesc $r.GoodTokens $MinTokensMatch
+  $hasResult = [int]$r.Total -gt 0
+  $partOK    = $hasResult -and (Test-Tokens $r.FirstDesc $r.GoodTokens $MinTokensMatch)
+  $hasAm     = [int]$r.AftermarketCount -gt 0
+  $hasOemRef = [int]$r.OEMNumbersCount -gt 0
+  $hasSup    = $r.HasSupersession -eq "true"
+  $hasRepl   = $hasAm -or $hasOemRef -or $hasSup
   $isTimeout = ($r.IsTimeout -eq "True") -or ([double]$r.ElapsedS -ge 14)
 
-  $class = switch ($r.GroundTruth) {
-    "exists"        { if ($hit -and $tokensOK) { "TP" } elseif ($hit) { "FPc" } else { "FN" } }
-    "not_hk_format" { if ($hit) { "FPe" } else { "TN" } }
-    "non_hk"        { if ($hit) { "FPn" } else { "TN" } }
+  # HIT: returned any result at all
+  $hitClass = switch ($r.GroundTruth) {
+    "exists"        { if ($hasResult) { "TP" } else { "FN" } }
+    "not_hk_format" { if ($hasResult) { "FP" } else { "TN" } }
+    "non_hk"        { if ($hasResult) { "FP" } else { "TN" } }
+    default         { "UNK" }
+  }
+  # PART: hit + correct category
+  $partClass = switch ($r.GroundTruth) {
+    "exists"        { if ($partOK) { "TP" } elseif ($hasResult) { "FP" } else { "FN" } }
+    "not_hk_format" { if ($hasResult) { "FP" } else { "TN" } }
+    "non_hk"        { if ($hasResult) { "FP" } else { "TN" } }
+    default         { "UNK" }
+  }
+  # REPL: hit + at least one replacement
+  $replClass = switch ($r.GroundTruth) {
+    "exists"        { if ($hasResult -and $hasRepl) { "TP" } elseif ($hasResult) { "FP" } else { "FN" } }
+    "not_hk_format" { if ($hasResult) { "FP" } else { "TN" } }
+    "non_hk"        { if ($hasResult) { "FP" } else { "TN" } }
+    default         { "UNK" }
+  }
+  # FULL: hit + correct category + replacement
+  $fullClass = switch ($r.GroundTruth) {
+    "exists"        { if ($partOK -and $hasRepl) { "TP" } elseif ($hasResult) { "FP" } else { "FN" } }
+    "not_hk_format" { if ($hasResult) { "FP" } else { "TN" } }
+    "non_hk"        { if ($hasResult) { "FP" } else { "TN" } }
     default         { "UNK" }
   }
 
-  $failReason = switch ($class) {
-    "TP"  { "" }
-    "FPc" { "wrong-category: got '$($r.FirstCategory)' / desc '$($r.FirstDesc)' but expected tokens '$($r.GoodTokens)'" }
-    "FPe" { "not_hk_format leaked (n=$($r.Total))" }
-    "FPn" { "NON-HK LEAK: '$($r.OEM)' returned $($r.Total) results (expected empty)" }
-    "FN"  {
-      if ($isTimeout) { "TIMEOUT at ${$r.ElapsedS}s" }
-      elseif ([int]$r.HttpStatus -ne 200) { "HTTP $($r.HttpStatus)" }
-      else { "no results" }
-    }
-    "TN"  { "" }
-    default { "unclassified" }
+  $failReason = ""
+  if ($fullClass -eq "FP") {
+    if (-not $partOK -and -not $hasRepl) { $failReason = "wrong-part+no-replacement" }
+    elseif (-not $partOK) { $failReason = "wrong-part (has replacement)" }
+    elseif (-not $hasRepl) { $failReason = "correct-part / no-replacement (AM=$($r.AftermarketCount) OEMx=$($r.OEMNumbersCount) sup=$($r.HasSupersession))" }
+  } elseif ($fullClass -eq "FN") {
+    if ($isTimeout) { $failReason = "TIMEOUT at $($r.ElapsedS)s" }
+    elseif ([int]$r.HttpStatus -ne 200) { $failReason = "HTTP $($r.HttpStatus)" }
+    else { $failReason = "no results" }
   }
 
   [PSCustomObject]@{
@@ -101,190 +131,163 @@ $classified = $rows | ForEach-Object {
     FirstDesc        = $r.FirstDesc
     FirstBrand       = $r.FirstBrand
     FirstCategory    = $r.FirstCategory
-    TokensOK         = $tokensOK
-    Class            = $class
-    FailReason       = $failReason
+    HitClass         = $hitClass
+    PartClass        = $partClass
+    ReplClass        = $replClass
+    FullClass        = $fullClass
+    HasHit           = $hasResult
+    PartOK           = $partOK
+    HasAftermarket   = $hasAm
+    HasOEMRef        = $hasOemRef
+    HasSupersession  = $hasSup
+    HasReplacement   = $hasRepl
     AftermarketCount = [int]$r.AftermarketCount
     AftermarketSample= $r.AftermarketSample
     SpecsCount       = [int]$r.SpecsCount
     VehiclesCount    = [int]$r.VehiclesCount
-    HasSupersession  = $r.HasSupersession -eq "true"
     OEMNumbersCount  = [int]$r.OEMNumbersCount
     OEMNumbersSample = $r.OEMNumbersSample
-    Warnings         = $r.Warnings
+    FailReason       = $failReason
   }
 }
 
-# ------------ Per-category CSV (ALL categories, no top-N cut) ------------
+function Compute-F1Set($group) {
+  $hitTP = ($group | Where-Object { $_.HitClass  -eq "TP" }).Count
+  $hitFP = ($group | Where-Object { $_.HitClass  -eq "FP" }).Count
+  $hitFN = ($group | Where-Object { $_.HitClass  -eq "FN" }).Count
+  $partTP= ($group | Where-Object { $_.PartClass -eq "TP" }).Count
+  $partFP= ($group | Where-Object { $_.PartClass -eq "FP" }).Count
+  $partFN= ($group | Where-Object { $_.PartClass -eq "FN" }).Count
+  $replTP= ($group | Where-Object { $_.ReplClass -eq "TP" }).Count
+  $replFP= ($group | Where-Object { $_.ReplClass -eq "FP" }).Count
+  $replFN= ($group | Where-Object { $_.ReplClass -eq "FN" }).Count
+  $fullTP= ($group | Where-Object { $_.FullClass -eq "TP" }).Count
+  $fullFP= ($group | Where-Object { $_.FullClass -eq "FP" }).Count
+  $fullFN= ($group | Where-Object { $_.FullClass -eq "FN" }).Count
+  $h = Get-F1 $hitTP $hitFP $hitFN
+  $p = Get-F1 $partTP $partFP $partFN
+  $r = Get-F1 $replTP $replFP $replFN
+  $f = Get-F1 $fullTP $fullFP $fullFN
+  return @{
+    Hit  = @{TP=$hitTP;  FP=$hitFP;  FN=$hitFN;  P=$h.P; R=$h.R; F1=$h.F1}
+    Part = @{TP=$partTP; FP=$partFP; FN=$partFN; P=$p.P; R=$p.R; F1=$p.F1}
+    Repl = @{TP=$replTP; FP=$replFP; FN=$replFN; P=$r.P; R=$r.R; F1=$r.F1}
+    Full = @{TP=$fullTP; FP=$fullFP; FN=$fullFN; P=$f.P; R=$f.R; F1=$f.F1}
+  }
+}
+
+# ------------ Per-category ------------
 $catRows = $classified | Group-Object ExpectedCategory | ForEach-Object {
   $g = $_.Group
-  $existsOnly = $g | Where-Object { $_.GroundTruth -eq "exists" }
-  $tp  = ($g | Where-Object { $_.Class -eq "TP" }).Count
-  $fpc = ($g | Where-Object { $_.Class -eq "FPc" }).Count
-  $fpe = ($g | Where-Object { $_.Class -eq "FPe" }).Count
-  $fpn = ($g | Where-Object { $_.Class -eq "FPn" }).Count
-  $fp  = $fpc + $fpe + $fpn
-  $fn  = ($g | Where-Object { $_.Class -eq "FN" }).Count
-  $tn  = ($g | Where-Object { $_.Class -eq "TN" }).Count
-  $prf = Get-F1 $tp $fp $fn
+  $n = $g.Count
+  $existsCount = ($g | Where-Object { $_.GroundTruth -eq "exists" }).Count
+  $f1s = Compute-F1Set $g
+  $hitCount = ($g | Where-Object { $_.HasHit }).Count
 
-  $amHits    = ($g | Where-Object { $_.AftermarketCount -gt 0 }).Count
-  $specsHits = ($g | Where-Object { $_.SpecsCount -gt 0 }).Count
-  $vehHits   = ($g | Where-Object { $_.VehiclesCount -gt 0 }).Count
-  $supHits   = ($g | Where-Object { $_.HasSupersession }).Count
-  $oemHits   = ($g | Where-Object { $_.OEMNumbersCount -gt 0 }).Count
-  $hitCount  = ($g | Where-Object { $_.Total -gt 0 }).Count
+  $amHits = ($g | Where-Object { $_.HasAftermarket }).Count
+  $oemHits= ($g | Where-Object { $_.HasOEMRef }).Count
+  $supHits= ($g | Where-Object { $_.HasSupersession }).Count
 
   [PSCustomObject]@{
     ExpectedCategory = if ($_.Name) { $_.Name } else { "<blank>" }
-    N                = $g.Count
-    N_exists         = $existsOnly.Count
-    TP               = $tp
-    FP_wrong_cat     = $fpc
-    FP_empty_leak    = $fpe
-    FP_non_hk_leak   = $fpn
-    FN               = $fn
-    TN               = $tn
-    Precision        = $prf.P
-    Recall           = $prf.R
-    F1               = $prf.F1
-    Hits             = $hitCount
+    N                = $n
+    N_exists         = $existsCount
+    "F1_hit"         = $f1s.Hit.F1
+    "F1_part"        = $f1s.Part.F1
+    "F1_repl"        = $f1s.Repl.F1
+    "F1_full"        = $f1s.Full.F1
+    "hit_TP"         = $f1s.Hit.TP
+    "part_TP"        = $f1s.Part.TP
+    "repl_TP"        = $f1s.Repl.TP
+    "full_TP"        = $f1s.Full.TP
     Aftermarket_pct  = if ($hitCount -gt 0) { [Math]::Round(100.0 * $amHits / $hitCount, 1) } else { 0 }
-    Specs_pct        = if ($hitCount -gt 0) { [Math]::Round(100.0 * $specsHits / $hitCount, 1) } else { 0 }
-    Vehicles_pct     = if ($hitCount -gt 0) { [Math]::Round(100.0 * $vehHits / $hitCount, 1) } else { 0 }
+    OEMxRef_pct      = if ($hitCount -gt 0) { [Math]::Round(100.0 * $oemHits / $hitCount, 1) } else { 0 }
     Supersession_pct = if ($hitCount -gt 0) { [Math]::Round(100.0 * $supHits / $hitCount, 1) } else { 0 }
-    OEMNumbers_pct   = if ($hitCount -gt 0) { [Math]::Round(100.0 * $oemHits / $hitCount, 1) } else { 0 }
   }
 } | Sort-Object N -Descending
 $catRows | Export-Csv $catFile -Encoding utf8 -NoTypeInformation
 Write-Host "Wrote per-category CSV: $catFile ($($catRows.Count) categories)"
 
-# ------------ Per-system CSV ------------
+# ------------ Per-system ------------
 $sysRows = $classified | Group-Object ExpectedSystem | ForEach-Object {
   $g = $_.Group
-  $tp = ($g | Where-Object { $_.Class -eq "TP" }).Count
-  $fp = ($g | Where-Object { $_.Class -match "^FP" }).Count
-  $fn = ($g | Where-Object { $_.Class -eq "FN" }).Count
-  $tn = ($g | Where-Object { $_.Class -eq "TN" }).Count
-  $prf = Get-F1 $tp $fp $fn
-  $hitCount  = ($g | Where-Object { $_.Total -gt 0 }).Count
-  $amHits    = ($g | Where-Object { $_.AftermarketCount -gt 0 }).Count
-  $specsHits = ($g | Where-Object { $_.SpecsCount -gt 0 }).Count
+  $f1s = Compute-F1Set $g
   [PSCustomObject]@{
-    ExpectedSystem   = if ($_.Name) { $_.Name } else { "<blank>" }
-    N                = $g.Count
-    TP               = $tp
-    FP               = $fp
-    FN               = $fn
-    TN               = $tn
-    Precision        = $prf.P
-    Recall           = $prf.R
-    F1               = $prf.F1
-    Aftermarket_pct  = if ($hitCount -gt 0) { [Math]::Round(100.0 * $amHits / $hitCount, 1) } else { 0 }
-    Specs_pct        = if ($hitCount -gt 0) { [Math]::Round(100.0 * $specsHits / $hitCount, 1) } else { 0 }
+    ExpectedSystem = if ($_.Name) { $_.Name } else { "<blank>" }
+    N              = $g.Count
+    "F1_hit"       = $f1s.Hit.F1
+    "F1_part"      = $f1s.Part.F1
+    "F1_repl"      = $f1s.Repl.F1
+    "F1_full"      = $f1s.Full.F1
   }
 } | Sort-Object N -Descending
 $sysRows | Export-Csv $sysFile -Encoding utf8 -NoTypeInformation
 Write-Host "Wrote per-system CSV:   $sysFile ($($sysRows.Count) systems)"
 
-# ------------ Per-slice CSV ------------
+# ------------ Per-slice ------------
 $sliceRows = $classified | Group-Object Slice | ForEach-Object {
   $g = $_.Group
-  $tp = ($g | Where-Object { $_.Class -eq "TP" }).Count
-  $fp = ($g | Where-Object { $_.Class -match "^FP" }).Count
-  $fn = ($g | Where-Object { $_.Class -eq "FN" }).Count
-  $tn = ($g | Where-Object { $_.Class -eq "TN" }).Count
-  $prf = Get-F1 $tp $fp $fn
-  $hitCount  = ($g | Where-Object { $_.Total -gt 0 }).Count
-  $amHits    = ($g | Where-Object { $_.AftermarketCount -gt 0 }).Count
-  $specsHits = ($g | Where-Object { $_.SpecsCount -gt 0 }).Count
-  $vehHits   = ($g | Where-Object { $_.VehiclesCount -gt 0 }).Count
+  $f1s = Compute-F1Set $g
   [PSCustomObject]@{
-    Slice            = $_.Name
-    N                = $g.Count
-    TP               = $tp
-    FP               = $fp
-    FN               = $fn
-    TN               = $tn
-    Precision        = $prf.P
-    Recall           = $prf.R
-    F1               = $prf.F1
-    Aftermarket_pct  = if ($hitCount -gt 0) { [Math]::Round(100.0 * $amHits / $hitCount, 1) } else { 0 }
-    Specs_pct        = if ($hitCount -gt 0) { [Math]::Round(100.0 * $specsHits / $hitCount, 1) } else { 0 }
-    Vehicles_pct     = if ($hitCount -gt 0) { [Math]::Round(100.0 * $vehHits / $hitCount, 1) } else { 0 }
+    Slice     = $_.Name
+    N         = $g.Count
+    "F1_hit"  = $f1s.Hit.F1
+    "F1_part" = $f1s.Part.F1
+    "F1_repl" = $f1s.Repl.F1
+    "F1_full" = $f1s.Full.F1
+    "hit_TP"  = $f1s.Hit.TP
+    "part_TP" = $f1s.Part.TP
+    "repl_TP" = $f1s.Repl.TP
+    "full_TP" = $f1s.Full.TP
   }
 } | Sort-Object N -Descending
 $sliceRows | Export-Csv $sliceFile -Encoding utf8 -NoTypeInformation
 Write-Host "Wrote per-slice CSV:    $sliceFile"
 
-# ------------ Failures CSV (every FN, FPc, FPe, FPn) ------------
-$failures = $classified | Where-Object { $_.Class -in @("FN","FPc","FPe","FPn") } |
-  Select-Object OEM, Slice, GroundTruth, ExpectedCategory, ExpectedSystem, GoodTokens, Class, FailReason, Total, FirstDesc, FirstCategory, FirstBrand, ElapsedS, IsTimeout
+# ------------ Failures (every FN + FP under FullClass) ------------
+$failures = $classified | Where-Object { $_.FullClass -in @("FN","FP") } |
+  Select-Object OEM, Slice, GroundTruth, ExpectedCategory, ExpectedSystem, GoodTokens,
+                FullClass, FailReason, Total, FirstDesc, FirstBrand, FirstCategory,
+                HasAftermarket, HasOEMRef, HasSupersession, ElapsedS, IsTimeout
 $failures | Export-Csv $failFile -Encoding utf8 -NoTypeInformation
 Write-Host "Wrote failures CSV:     $failFile ($($failures.Count) failures)"
 
 # ------------ Summary ------------
-$totalRows = $classified.Count
-$totalTP  = ($classified | Where-Object { $_.Class -eq "TP" }).Count
-$totalFPc = ($classified | Where-Object { $_.Class -eq "FPc" }).Count
-$totalFPe = ($classified | Where-Object { $_.Class -eq "FPe" }).Count
-$totalFPn = ($classified | Where-Object { $_.Class -eq "FPn" }).Count
-$totalFN  = ($classified | Where-Object { $_.Class -eq "FN" }).Count
-$totalTN  = ($classified | Where-Object { $_.Class -eq "TN" }).Count
-$totalFP  = $totalFPc + $totalFPe + $totalFPn
-$overall  = Get-F1 $totalTP $totalFP $totalFN
-
-$hits     = ($classified | Where-Object { $_.Total -gt 0 }).Count
-$amHits   = ($classified | Where-Object { $_.AftermarketCount -gt 0 }).Count
-$specsHits= ($classified | Where-Object { $_.SpecsCount -gt 0 }).Count
-$vehHits  = ($classified | Where-Object { $_.VehiclesCount -gt 0 }).Count
-$supHits  = ($classified | Where-Object { $_.HasSupersession }).Count
-$oemHits  = ($classified | Where-Object { $_.OEMNumbersCount -gt 0 }).Count
-$timeouts = ($classified | Where-Object { $_.IsTimeout }).Count
-
-$catsPerfect = ($catRows | Where-Object { $_.F1 -ge 0.95 -and $_.N_exists -ge 5 }).Count
-$catsBroken  = ($catRows | Where-Object { $_.F1 -eq 0 -and $_.N_exists -ge 3 }).Count
+$overall = Compute-F1Set $classified
+$catsFullOk = ($catRows | Where-Object { $_.F1_full -ge 0.95 -and $_.N_exists -ge 5 }).Count
+$catsFullFail = ($catRows | Where-Object { $_.F1_full -lt 0.5 -and $_.N_exists -ge 3 }).Count
 
 $summary = @"
 =====================================================================
 QA SEARCH QUALITY REPORT - $dateStamp
 =====================================================================
 Source: $InputCSV
-Rows:   $totalRows
+Rows:   $($rows.Count)
 
 --- Ground truth distribution ---
 $($classified | Group-Object GroundTruth | ForEach-Object { "  {0,-18} n={1}" -f $_.Name, $_.Count } | Out-String)
---- Overall (all rows, all slices) ---
-  TP = $totalTP  FN = $totalFN
-  FP (wrong-category) = $totalFPc
-  FP (empty-leak)     = $totalFPe
-  FP (non-HK leak)    = $totalFPn
-  TN = $totalTN
-  Precision = $($overall.P)   Recall = $($overall.R)   F1 = $($overall.F1)
+--- FOUR-LAYER F1 (overall) ---
+  F1_hit  = $($overall.Hit.F1)   (returned any result - basic recall)
+  F1_part = $($overall.Part.F1)   (hit + correct category identification)
+  F1_repl = $($overall.Repl.F1)   (hit + >=1 replacement: aftermarket / OEMxref / supersession)
+  F1_full = $($overall.Full.F1)   (hit + correct category + >=1 replacement - "app fulfills promise")
 
---- Enrichment coverage (of $hits hits) ---
-  Aftermarket populated:   $amHits   ($([Math]::Round(100.0 * $amHits / [Math]::Max(1,$hits), 1))%)
-  Specs populated:         $specsHits   ($([Math]::Round(100.0 * $specsHits / [Math]::Max(1,$hits), 1))%)
-  CompatibleVehicles:      $vehHits   ($([Math]::Round(100.0 * $vehHits / [Math]::Max(1,$hits), 1))%)
-  Supersession chain:      $supHits   ($([Math]::Round(100.0 * $supHits / [Math]::Max(1,$hits), 1))%)
-  OEM cross-references:    $oemHits   ($([Math]::Round(100.0 * $oemHits / [Math]::Max(1,$hits), 1))%)
-
---- Timeouts ---
-  Rows >=14s: $timeouts   ($([Math]::Round(100.0 * $timeouts / $totalRows, 1))%)
-
---- Category coverage ---
-  Total distinct categories: $($catRows.Count)
-  F1 >= 0.95 (n_exists >= 5):  $catsPerfect
-  F1 = 0    (n_exists >= 3):   $catsBroken
+Target: F1_full >= 0.95 on replaceable-parts categories.
+Body / glass / dealer-accessory categories have a data-source ceiling.
 
 --- Per-slice F1 ---
 $($sliceRows | Format-Table -AutoSize | Out-String)
 
---- Top 15 broken categories (F1=0, n_exists >= 3) ---
-$($catRows | Where-Object { $_.F1 -eq 0 -and $_.N_exists -ge 3 } | Sort-Object N_exists -Descending | Select-Object -First 15 ExpectedCategory, N_exists, FP_wrong_cat, FN | Format-Table -AutoSize | Out-String)
+--- Categories at or above F1_full = 0.95 (n_exists >= 5) ---
+$($catRows | Where-Object { $_.F1_full -ge 0.95 -and $_.N_exists -ge 5 } | Sort-Object N_exists -Descending | Select-Object ExpectedCategory, N_exists, F1_full, Aftermarket_pct, OEMxRef_pct | Format-Table -AutoSize | Out-String)
 
---- Top 15 working categories (F1 >= 0.90, n_exists >= 5) ---
-$($catRows | Where-Object { $_.F1 -ge 0.90 -and $_.N_exists -ge 5 } | Sort-Object N_exists -Descending | Select-Object -First 15 ExpectedCategory, N_exists, TP, F1, Aftermarket_pct, Specs_pct | Format-Table -AutoSize | Out-String)
+--- Categories below F1_full = 0.50 (n_exists >= 3, top 20) ---
+$($catRows | Where-Object { $_.F1_full -lt 0.5 -and $_.N_exists -ge 3 } | Sort-Object N_exists -Descending | Select-Object -First 20 ExpectedCategory, N_exists, F1_hit, F1_part, F1_repl, F1_full | Format-Table -AutoSize | Out-String)
+
+--- Category summary ---
+  Total distinct categories: $($catRows.Count)
+  Meeting 95% F1_full target (n_exists >= 5): $catsFullOk
+  Below 50% F1_full (n_exists >= 3):          $catsFullFail
 
 --- Files ---
   Full per-category CSV: $catFile
