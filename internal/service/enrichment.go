@@ -134,19 +134,39 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			oem := enriched.Part.ArticleNumber
 
 			if articleId == 0 && oem != "" && s.tecdoc != nil && budgetLeft() {
-				// Promote OEM string → TecDoc articleId(s). This also
-				// populates OEMNumbers so callers can see the raw cross-refs.
+				// Primary: oem_number table (sparse HK coverage — ~5% of real HK
+				// OEMs per the 2026-08-23 quality audit).
 				refs, err := s.tecdoc.SearchByOEM(oem, 5)
 				if err == nil && len(refs) > 0 {
-					// Pick the first ref with a non-zero articleId.
 					for _, ref := range refs {
 						if ref.LegacyArticleId > 0 {
 							articleId = ref.LegacyArticleId
 							break
 						}
 					}
-					// Attach the resolved OEMNumbers for downstream UI use.
 					enriched.OEMNumbers = append(enriched.OEMNumbers, refs...)
+				}
+
+				// Fallback: articlecrosses via SearchCrossReferences. The
+				// 2026-08-23 quality audit found 0% CompatibleVehicles + 2.5%
+				// Specs coverage because SearchByOEM returned 0 refs 74% of
+				// the time, leaving articleId=0 and skipping all
+				// article-anchored enrichment. articlecrosses (30M rows,
+				// indexed by sql/06) has broader HK OEM coverage than
+				// oem_number (21.5M rows); when the primary path fails, try
+				// the cross-ref path before giving up on article-anchored
+				// enrichment.
+				if articleId == 0 && s.tecDocCrossRef != nil && budgetLeft() {
+					crossRefs, cerr := s.tecDocCrossRef.SearchCrossReferences(oem, 5)
+					if cerr == nil && len(crossRefs) > 0 {
+						for _, ref := range crossRefs {
+							if ref.LegacyArticleId > 0 {
+								articleId = ref.LegacyArticleId
+								break
+							}
+						}
+						enriched.OEMNumbers = append(enriched.OEMNumbers, crossRefs...)
+					}
 				}
 			}
 

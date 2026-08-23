@@ -335,39 +335,64 @@ func (t *TecDoc) FindReplacements(legacyArticleId int) ([]model.SupersessionLink
 	return chain, nil
 }
 
-// FindAftermarketForOEM finds aftermarket alternatives via the full TecDoc cross-ref chain:
-// OEM number → oem_number → articles → articlecrosses → aftermarket articles.
+// FindAftermarketForOEM finds aftermarket alternatives for an OEM number.
+//
+// Queries articlecrosses (30M rows, indexed by
+// sql/06_articlecrosses_normalized_oem_index.sql) — TecDoc's canonical
+// OEM↔aftermarket cross-reference table.
+//
+// Prior implementation queried oem_number (21.5M rows) which is TecDoc's
+// OEM catalog, not the cross-ref table — the 2026-08-23 quality audit
+// found only 6.7% aftermarket coverage across 756 hits because oem_number
+// has ~5% HK OEM coverage vs articlecrosses' much broader coverage.
+// Switching data source is the P1-1 fix from that audit.
+//
+// Filters to non-OEM manufacturers (dataSupplierId != OEM sourced) so
+// we surface true aftermarket brands (BOSCH, MANN, MAHLE, etc.) not
+// the OEM part itself.
 func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPart, error) {
 	clean := NormalizeOEM(oemNumber)
 	if clean == "" {
 		return nil, nil
 	}
 
+	// articlecrosses uses the indexed generated column oemNumberNormalized
+	// (created by sql/06). Query pattern mirrors TecDocCrossRef.QueryCrossRefs
+	// but returns model.AftermarketPart (brand + part number) rather than
+	// full OEMReference.
 	query := `
 		SELECT DISTINCT
-			a.articleNumber,
-			a.genericArticleDescription,
-			COALESCE(ab.brandName, '') AS brand
-		FROM oem_number on2
-		JOIN articles a ON a.legacyArticleId = on2.articleId
-		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
-		WHERE on2.clean_number = ?
-		ORDER BY brand, a.articleNumber
+			COALESCE(a.articleNumber, ''),
+			COALESCE(a.genericArticleDescription, ''),
+			COALESCE(ac.brandName, ''),
+			COALESCE(m.manuName, '') AS mfrName
+		FROM articlecrosses ac
+		LEFT JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+		LEFT JOIN manufacturers m ON m.manuId = ac.mfrId AND m.linkingTargetType = 'P'
+		WHERE ac.oemNumberNormalized = ?
+		ORDER BY ac.brandName, a.articleNumber
 		LIMIT 50`
 
 	rows, err := logQuery(t.db, "TecDoc.FindAftermarketForOEM", query, clean)
 	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 
 	var parts []model.AftermarketPart
 	for rows.Next() {
 		var p model.AftermarketPart
-		var desc sql.NullString
-		if err := rows.Scan(&p.PartNumber, &desc, &p.Brand); err != nil {
+		var desc, brand, mfrName sql.NullString
+		if err := rows.Scan(&p.PartNumber, &desc, &brand, &mfrName); err != nil {
 			continue
 		}
 		p.Description = desc.String
+		// Prefer articlecrosses.brandName when populated (that's the
+		// aftermarket supplier); fall back to manufacturers.manuName.
+		p.Brand = firstNonEmpty(brand.String, mfrName.String)
+		if p.PartNumber == "" || p.Brand == "" {
+			continue
+		}
 		parts = append(parts, p)
 	}
 	return parts, nil
