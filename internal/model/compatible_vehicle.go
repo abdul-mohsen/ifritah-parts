@@ -12,12 +12,18 @@ package model
 // FitmentDriver mirrors the ClassifyCategory driver (e.g. "engine",
 // "chassis", "electrical") so consumers can render category-appropriate
 // evidence without re-classifying.
+//
+// Chassis and EngineSpec are populated by M3.S2.T2 from the raw
+// linkagetargets.description (e.g. "(TL)" -> Chassis, "2.0 CRDi 4WD 136HP" ->
+// EngineSpec). Empty when the description doesn't include them.
 type CompatibleVehicle struct {
 	LegacyArticleId int    `json:"legacyArticleId"`
 	LinkageTargetId int    `json:"linkageTargetId"`
 	VehicleName     string `json:"vehicleName"`
 	Make            string `json:"make,omitempty"`
 	Model           string `json:"model,omitempty"`
+	Chassis         string `json:"chassis,omitempty"`
+	EngineSpec      string `json:"engineSpec,omitempty"`
 	YearFrom        int    `json:"yearFrom,omitempty"`
 	YearTo          int    `json:"yearTo,omitempty"`
 	FuelType        string `json:"fuelType,omitempty"`

@@ -70,12 +70,20 @@ func (s *TecDocVehicle) FindCompatibleVehicles(legacyArticleId, limit int) ([]mo
 			continue
 		}
 		seen[r.LinkageTargetId] = true
+
+		// M3.S2.T2: extract structured chassis + engine spec from the
+		// raw description so the frontend can render "Tucson (TL) 2.0
+		// CRDi 4WD" without re-parsing the label client-side.
+		parsed := parseVehicleDescription(r.VehicleName)
+
 		out = append(out, model.CompatibleVehicle{
 			LegacyArticleId: legacyArticleId,
 			LinkageTargetId: r.LinkageTargetId,
 			VehicleName:     r.VehicleName,
 			Make:            r.Make,
 			Model:           r.Model,
+			Chassis:         parsed.Chassis,
+			EngineSpec:      parsed.EngineSpec,
 			YearFrom:        yearFromYearMonth(r.BeginYearMonth),
 			YearTo:          yearFromYearMonth(r.EndYearMonth),
 			FuelType:        r.FuelType,
