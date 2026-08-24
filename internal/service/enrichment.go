@@ -171,6 +171,26 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 						enriched.OEMNumbers = append(enriched.OEMNumbers, crossRefs...)
 					}
 				}
+
+				// M3.S1.T1: third-level fallback via oem_search_index.
+				// When both the primary oem_number lookup AND the
+				// articlecrosses fallback return 0 refs, try the
+				// secondary index table PR #14 introduced. Some OEMs
+				// only appear here (fuzzy-match cross-refs cataloged
+				// against slightly different OEM strings). Reads via
+				// TecDoc.SearchByOEM's secondary path shape.
+				if articleId == 0 && s.tecdoc != nil && budgetLeft() {
+					idxRefs, ierr := s.tecdoc.SearchByOEMIndex(oem, 5)
+					if ierr == nil && len(idxRefs) > 0 {
+						for _, ref := range idxRefs {
+							if ref.LegacyArticleId > 0 {
+								articleId = ref.LegacyArticleId
+								break
+							}
+						}
+						enriched.OEMNumbers = append(enriched.OEMNumbers, idxRefs...)
+					}
+				}
 			}
 
 			// Aftermarket alternatives — works for BOTH articleId paths
@@ -200,7 +220,12 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			}
 
 			// Always: specifications
-			if s.tecDocSpecs != nil && budgetLeft() {
+			// M3.S1.T2: skip specs in the per-result goroutine — we
+			// batch-fetch them after collect. Legacy per-result call
+			// left in place for callers that don't have tecDocSpecs
+			// wired but the batch path can still succeed.
+			_ = articleId // suppress unused warning if we remove the block
+			if false && s.tecDocSpecs != nil && budgetLeft() {
 				if specs, err := s.tecDocSpecs.FindSpecifications(articleId); err == nil {
 					enriched.Specifications = specs
 				} else {
@@ -351,6 +376,39 @@ collectLoop:
 		case <-ctx.Done():
 			log.Printf("[enrichResults] ctx deadline exceeded after %d/%d results — returning partial (some goroutines may still be running)", i, len(results))
 			break collectLoop
+		}
+	}
+
+	// M3.S1.T2: post-collect batch enrichment for specifications. Cheaper
+	// than per-result FindSpecifications when the response has many hits
+	// AND requires sql/07_articlecriteria_indexes.sql applied on qa
+	// (otherwise the IN-list query is N full scans of articlecriteria).
+	//
+	// Only runs when tecDocSpecs is wired, the request asks for enrichment
+	// beyond 'basic', and ctx still has budget.
+	if s.tecDocSpecs != nil && ctx.Err() == nil {
+		articleIds := make([]int, 0, len(out))
+		idToIdx := make(map[int][]int, len(out))
+		for i, r := range out {
+			id := r.LegacyArticleId
+			if id > 0 {
+				articleIds = append(articleIds, id)
+				idToIdx[id] = append(idToIdx[id], i)
+			}
+		}
+		if len(articleIds) > 0 {
+			specsById, err := s.tecDocSpecs.FindSpecificationsBatch(articleIds)
+			if err != nil {
+				log.Printf("[enrichResults] batch specs err=%v (falling back to skip specs)", err)
+			} else {
+				for id, specs := range specsById {
+					for _, idx := range idToIdx[id] {
+						if len(out[idx].Specifications) == 0 {
+							out[idx].Specifications = specs
+						}
+					}
+				}
+			}
 		}
 	}
 

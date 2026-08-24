@@ -129,6 +129,65 @@ func (t *TecDoc) SearchByOEM(oemNumber string, limit int) ([]model.OEMReference,
 	return refs, nil
 }
 
+// SearchByOEMIndex is the third-level article-id promotion path used by
+// enrichResults (M3.S1.T1). Queries oem_search_index directly instead of
+// going through the primary oem_number path. Some HK OEMs land here only
+// (fuzzy cross-refs stored against slightly different OEM strings).
+//
+// Same query shape as SearchByOEM's secondary block, extracted so it can
+// run independently. Returns []model.OEMReference with Manufacturer set
+// to "CROSSREF" so downstream consumers can tell where the ref came from.
+func (t *TecDoc) SearchByOEMIndex(oemNumber string, limit int) ([]model.OEMReference, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	clean := NormalizeOEM(oemNumber)
+	if clean == "" {
+		return nil, fmt.Errorf("empty OEM number")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const q = `
+		SELECT osi.raw_number, osi.legacyArticleId,
+		       COALESCE(a.articleNumber,''), COALESCE(a.genericArticleDescription,''),
+		       COALESCE(ab.brandName,'') AS brand
+		FROM oem_search_index osi
+		LEFT JOIN articles a ON a.legacyArticleId = osi.legacyArticleId
+		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
+		WHERE osi.normalized = ?
+		LIMIT ?`
+
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.SearchByOEMIndex", q, clean, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []model.OEMReference
+	seen := map[int]bool{}
+	for rows.Next() {
+		var ref model.OEMReference
+		var desc, brand sql.NullString
+		if err := rows.Scan(&ref.RawNumber, &ref.LegacyArticleId, &ref.ArticleNumber,
+			&desc, &brand); err != nil {
+			continue
+		}
+		if ref.LegacyArticleId != 0 && seen[ref.LegacyArticleId] {
+			continue
+		}
+		if ref.LegacyArticleId != 0 {
+			seen[ref.LegacyArticleId] = true
+		}
+		ref.Description = desc.String
+		ref.BrandName = brand.String
+		ref.Manufacturer = "CROSSREF"
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
 // SearchByKeyword uses the searchindex FULLTEXT index (5.8M rows) to find parts.
 func (t *TecDoc) SearchByKeyword(keyword string, limit int) ([]model.OEMReference, error) {
 	if limit <= 0 || limit > 100 {
