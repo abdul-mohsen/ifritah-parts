@@ -335,32 +335,96 @@ func (t *TecDoc) FindReplacements(legacyArticleId int) ([]model.SupersessionLink
 	return chain, nil
 }
 
-// FindAftermarketForOEM finds aftermarket alternatives for an OEM number.
+// FindAftermarketForOEM returns aftermarket alternatives for an OEM number
+// by running THREE lookup paths in parallel and unioning the deduped
+// results. Each path has different HK coverage — the union catches parts
+// that only one path knows about.
 //
-// Queries articlecrosses (30M rows, indexed by
-// sql/06_articlecrosses_normalized_oem_index.sql) — TecDoc's canonical
-// OEM↔aftermarket cross-reference table.
+//	Path 1: articlecrosses.oemNumberNormalized  - 30M rows, indexed by sql/06
+//	Path 2: oem_number.clean_number             - 21.5M rows, indexed by sql/06
+//	Path 3: oem_search_index.normalized         - PR #14 secondary xref
 //
-// Prior implementation queried oem_number (21.5M rows) which is TecDoc's
-// OEM catalog, not the cross-ref table — the 2026-08-23 quality audit
-// found only 6.7% aftermarket coverage across 756 hits because oem_number
-// has ~5% HK OEM coverage vs articlecrosses' much broader coverage.
-// Switching data source is the P1-1 fix from that audit.
+// The 2026-08-23 quality audit found 6.7% aftermarket coverage when only
+// path 1 ran (post-PR-#20 rewrite). M2.S1.T1 adds paths 2 and 3 so the
+// data-sparse case where one path returns 0 while another returns rows
+// still yields a full aftermarket list.
 //
-// Filters to non-OEM manufacturers (dataSupplierId != OEM sourced) so
-// we surface true aftermarket brands (BOSCH, MANN, MAHLE, etc.) not
-// the OEM part itself.
+// Dedup key: (NormalizeBrand(brand), lower(partNumber)) — so "BOSCH" /
+// "Bosch" / "Robert Bosch GmbH" collapse to one canonical entry.
+//
+// Per-path budget: 3s wall clock via ctx. If a path is slow, the others
+// still return what they have.
 func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPart, error) {
 	clean := NormalizeOEM(oemNumber)
 	if clean == "" {
 		return nil, nil
 	}
 
-	// articlecrosses uses the indexed generated column oemNumberNormalized
-	// (created by sql/06). Query pattern mirrors TecDocCrossRef.QueryCrossRefs
-	// but returns model.AftermarketPart (brand + part number) rather than
-	// full OEMReference.
-	query := `
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	type pathResult struct {
+		parts []model.AftermarketPart
+		err   error
+		name  string
+	}
+	resultCh := make(chan pathResult, 3)
+
+	go func() {
+		p, err := t.findAftermarketFromArticlecrosses(ctx, clean)
+		resultCh <- pathResult{p, err, "articlecrosses"}
+	}()
+	go func() {
+		p, err := t.findAftermarketFromOemNumber(ctx, clean)
+		resultCh <- pathResult{p, err, "oem_number"}
+	}()
+	go func() {
+		p, err := t.findAftermarketFromOemSearchIndex(ctx, clean)
+		resultCh <- pathResult{p, err, "oem_search_index"}
+	}()
+
+	seen := make(map[string]bool, 100)
+	var out []model.AftermarketPart
+
+	for i := 0; i < 3; i++ {
+		select {
+		case r := <-resultCh:
+			if r.err != nil {
+				log.Printf("[FindAftermarketForOEM] path=%s oem=%s err=%v", r.name, clean, r.err)
+				continue
+			}
+			for _, p := range r.parts {
+				if p.PartNumber == "" || p.Brand == "" {
+					continue
+				}
+				key := NormalizeBrand(p.Brand) + "|" + strings.ToLower(p.PartNumber)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, p)
+			}
+		case <-ctx.Done():
+			log.Printf("[FindAftermarketForOEM] ctx deadline exceeded oem=%s returning %d partial results", clean, len(out))
+			// Still tier-sort + cap what we have before returning.
+			SortAftermarketByTier(out)
+			return CapAftermarketList(out, 20, 3), nil
+		}
+	}
+
+	// M2.S2: tier-sort (Bosch/MANN/MAHLE first, alphabetical inside tier)
+	// then cap at 20 total / 3 per brand so the response doesn't overwhelm
+	// the UI or let one brand dominate.
+	SortAftermarketByTier(out)
+	return CapAftermarketList(out, 20, 3), nil
+}
+
+// findAftermarketFromArticlecrosses queries the articlecrosses 30M-row
+// cross-reference table via the sql/06 generated column index. This is
+// the primary aftermarket path — TecDoc's canonical OEM↔aftermarket
+// mapping.
+func (t *TecDoc) findAftermarketFromArticlecrosses(ctx context.Context, clean string) ([]model.AftermarketPart, error) {
+	const query = `
 		SELECT DISTINCT
 			COALESCE(a.articleNumber, ''),
 			COALESCE(a.genericArticleDescription, ''),
@@ -372,13 +436,67 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 		WHERE ac.oemNumberNormalized = ?
 		ORDER BY ac.brandName, a.articleNumber
 		LIMIT 50`
-
-	rows, err := logQuery(t.db, "TecDoc.FindAftermarketForOEM", query, clean)
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.FindAftermarketForOEM.articlecrosses", query, clean)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanAftermarketRows(rows), nil
+}
 
+// findAftermarketFromOemNumber queries the oem_number 21.5M-row TecDoc
+// OEM catalog. Some parts appear here but NOT in articlecrosses (the
+// aftermarket cross-ref only records brands that publish crosses; OEM
+// suppliers who don't publish appear here only).
+func (t *TecDoc) findAftermarketFromOemNumber(ctx context.Context, clean string) ([]model.AftermarketPart, error) {
+	const query = `
+		SELECT DISTINCT
+			COALESCE(a.articleNumber, ''),
+			COALESCE(a.genericArticleDescription, ''),
+			COALESCE(ab.brandName, '') AS brand,
+			'' AS mfrName
+		FROM oem_number on2
+		JOIN articles a ON a.legacyArticleId = on2.articleId
+		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
+		WHERE on2.clean_number = ?
+		ORDER BY ab.brandName, a.articleNumber
+		LIMIT 50`
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.FindAftermarketForOEM.oem_number", query, clean)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAftermarketRows(rows), nil
+}
+
+// findAftermarketFromOemSearchIndex queries the oem_search_index secondary
+// cross-ref table (introduced by PR #14). Fewer rows than articlecrosses
+// but catches a different slice of cross-refs — some OEMs only appear
+// here after supersession-chain walks.
+func (t *TecDoc) findAftermarketFromOemSearchIndex(ctx context.Context, clean string) ([]model.AftermarketPart, error) {
+	const query = `
+		SELECT DISTINCT
+			COALESCE(a.articleNumber, ''),
+			COALESCE(a.genericArticleDescription, ''),
+			COALESCE(ab.brandName, '') AS brand,
+			'' AS mfrName
+		FROM oem_search_index osi
+		LEFT JOIN articles a ON a.legacyArticleId = osi.legacyArticleId
+		LEFT JOIN ambrand ab ON ab.brandId = a.dataSupplierId AND ab.lang = 'en'
+		WHERE osi.normalized = ?
+		LIMIT 50`
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.FindAftermarketForOEM.oem_search_index", query, clean)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAftermarketRows(rows), nil
+}
+
+// scanAftermarketRows is the shared row-scanner used by all three
+// aftermarket lookup paths. Consolidates the (articleNumber, description,
+// brand, mfrName) column shape so per-path logic stays SQL-only.
+func scanAftermarketRows(rows *sql.Rows) []model.AftermarketPart {
 	var parts []model.AftermarketPart
 	for rows.Next() {
 		var p model.AftermarketPart
@@ -387,15 +505,13 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 			continue
 		}
 		p.Description = desc.String
-		// Prefer articlecrosses.brandName when populated (that's the
-		// aftermarket supplier); fall back to manufacturers.manuName.
 		p.Brand = firstNonEmpty(brand.String, mfrName.String)
 		if p.PartNumber == "" || p.Brand == "" {
 			continue
 		}
 		parts = append(parts, p)
 	}
-	return parts, nil
+	return parts
 }
 
 // ---------- Vehicle resolution ----------
