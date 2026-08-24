@@ -446,6 +446,36 @@ collectLoop:
 		results = filtered
 	}
 
+	// M1.S3.T2: category-consistency validation. When the queried OEM
+	// decodes to a known part-family, drop any result whose description
+	// doesn't contain a single token from the expected category label.
+	// This catches wrong-category hallucinations that the M1.S1 penalty
+	// only demotes but doesn't remove (mirror OEM 86391-* returning
+	// "Headlight Assembly" — headlight doesn't overlap with "mirrors"
+	// tokens so it gets dropped entirely).
+	//
+	// Opt-in only: nil expected-tokens means the OEM doesn't decode,
+	// so we can't validate — pass everything through.
+	if req.OEM != "" {
+		expected := CategoryTokensForOEM(req.OEM)
+		if len(expected) > 0 {
+			kept := results[:0]
+			dropped := 0
+			for _, r := range results {
+				if hasCategoryOverlap(r.Description, expected) {
+					kept = append(kept, r)
+					continue
+				}
+				dropped++
+			}
+			if dropped > 0 {
+				log.Printf("[Combined] category-mismatch DROPPED %d/%d results for oem=%q expected_tokens=%v",
+					dropped, len(results), req.OEM, expected)
+			}
+			results = kept
+		}
+	}
+
 	// M1.S1.T2: cross-family confidence penalty. When a result surfaced by a
 	// fallback strategy (cache / legacy / prefix_inference) has a category
 	// whose parent system does NOT match the queried OEM prefix's expected
