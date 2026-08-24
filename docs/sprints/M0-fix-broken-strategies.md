@@ -118,27 +118,43 @@ But **owned_catalog, supersession, vin_assembly, vehicle_fitment return 0 hits o
 
 ---
 
-### Task M0.T4 — Fix `vehicle_fitment` strategy
+### Task M0.T4 — Provide `vehicle_fitment` with valid linkage IDs (corpus, not code)
 
-**Goal.** Given a `linkageTargetId`, return every article linked to that vehicle.
+**Diagnosis (2026-08-24).** After tracing `VehicleFitmentStrategy.Search` → `searchByVehicle` → `TecDoc.PartsForVehicle`, the code path is intact. The query is `SELECT ... FROM articlesvehicletrees avt WHERE avt.linkingTargetId = ? AND avt.linkingTargetType = 'P'` — this works when the linkage ID exists. Our probe returned 0 because the arbitrary ID we passed (`39843`) has no rows in the qa MySQL. Additionally, `/api/catalog/vehicles?make=Hyundai&model=Elantra` returned `total=0` on qa, so the frontend has no way to obtain valid IDs either.
+
+The fix is **corpus + catalog wiring**, not strategy code.
+
+**Goal.** Populate the audit corpus with real linkage IDs so `vehicle_fitment` can be tested end-to-end, AND fix the catalog endpoint so users can obtain them.
 
 **Files:**
-- `internal/service/strategy.go` (VehicleFitmentStrategy)
-- `internal/service/tecdoc_vehicle.go`
+- `scripts/audit/corpus-1500-v2.csv` — add `LinkageTargetIds` column
+- New `scripts/audit/enrich_corpus_linkages.go` — batch tool that queries TecDoc MySQL
+- `scripts/audit/audit-quality.ps1` — thread linkage IDs into `vehicle_fitment` mode requests
+- Investigate `catalog/vehicles` endpoint (`internal/handler/catalog.go`) — why does it return 0?
 
 **Approach:**
-1. **Diagnose.** Query `SELECT COUNT(*) FROM articlelinkages WHERE linkageTargetId = 39843;` — is the data there?
-2. Trace `VehicleFitmentStrategy.Search()` — does it accept `linkageTargetId` from `StrategyRequest`?
-3. Very likely: the strategy expects a different field name (e.g. `req.LinkageTargetId` vs `req.LinkageTarget`).
-4. Fix the field wiring. Add a helper `strategy_test_helpers.go:MockStrategyRequest_WithLinkage()` for tests.
+1. **Sub-task A.** Fix `/api/catalog/vehicles` — it returns 0 even for Elantra. Trace the query in `internal/handler/catalog.go:Vehicles`. Likely the join to `modelseries` / `linkagetargets` has a filter that's too strict (e.g. `lang='en'` on a table with no English rows, or a `bodyStyle` filter that eliminates most rows). Fix and add a test.
+2. **Sub-task B.** Build the corpus enricher. For every OEM in `corpus-1500-v2.csv`:
+   ```sql
+   SELECT DISTINCT avt.linkingTargetId
+   FROM oem_number on
+   JOIN articles a ON a.legacyArticleId = on.articleId
+   JOIN articlesvehicletrees avt ON avt.legacyArticleId = a.legacyArticleId
+   WHERE on.clean_number = ? AND avt.linkingTargetType = 'P'
+   LIMIT 5;
+   ```
+   Store the top 5 IDs comma-separated in a new `LinkageTargetIds` column.
+3. **Sub-task C.** In `audit-quality.ps1`, when `mode == vehicle_fitment` and the corpus row has `LinkageTargetIds`, pick the first one and append `&linkageTargetId={id}` to the URL.
 
 **Acceptance criteria:**
-- [ ] Table-driven test with 3 known-good linkage-target IDs — each returns ≥ 100 articles.
-- [ ] `vehicle_fitment` F1_correct on a linkage-corpus ≥ 0.80 (each linkage should return correct parts).
+- [ ] Written diagnosis in `docs/data-sources/vehicle-fitment-audit-report.md`.
+- [ ] `/api/catalog/vehicles?make=Hyundai&model=Elantra` returns ≥ 5 vehicles (currently 0).
+- [ ] ≥ 60% of seeded-slice rows have ≥ 1 linkage ID after enrichment.
+- [ ] Re-run `vehicle_fitment` mode against the enriched corpus; expect F1_correct ≥ 0.80.
 
-**Effort:** S (likely just wiring)
+**Effort:** M (corpus enrichment) + M (catalog fix)
 
-**Dependencies:** none
+**Dependencies:** access to TecDoc MySQL for the enrichment query
 
 ---
 

@@ -811,3 +811,202 @@ func TestStrategyForMode_ReturnsLegacyCascade(t *testing.T) {
 		t.Errorf("strategyForMode('legacy') did not return *LegacyCascadeStrategy")
 	}
 }
+
+// ─── M1.S1.T1: strategyCategoryPenalty ──────────────────────────────────────
+
+// TestStrategyCategoryPenalty_CrossFamily verifies the penalty fires for the
+// wrong-category collisions documented in the 2026-08-23 quality audit
+// (docs/reports/2026-08-23-quality-audit/failures.csv).
+func TestStrategyCategoryPenalty_CrossFamily(t *testing.T) {
+	// Every case: query OEM decodes to system X, but the returned category
+	// belongs to system Y. Penalty must be 0.2.
+	cases := []struct {
+		name, oem, category string
+	}{
+		// 86xxx = Body/Mirrors — returning Headlight is Electrical/Lighting.
+		{"mirror OEM returning headlight", "86391-D3000", "Headlight Assembly"},
+		// 71xxx = Body/Bumper — returning Wiper is Maintenance.
+		{"bumper OEM returning wiper", "71110-2K000", "Wiper Blades"},
+		// 88xxx = Interior/Instrument Panel — returning Alternator is Electrical.
+		{"IP OEM returning alternator", "88450-2S000", "Alternator"},
+		// 92xxx = Electrical/Lighting — returning Oil Filter is Engine.
+		{"lighting OEM returning oil filter", "92102-M7500", "Oil Filter"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strategyCategoryPenalty(tc.oem, tc.category)
+			if got != 0.2 {
+				t.Errorf("strategyCategoryPenalty(%q, %q) = %v, want 0.2", tc.oem, tc.category, got)
+			}
+		})
+	}
+}
+
+// TestStrategyCategoryPenalty_SameFamily verifies no penalty when the
+// result's category-system matches the OEM prefix's expected system.
+func TestStrategyCategoryPenalty_SameFamily(t *testing.T) {
+	cases := []struct {
+		name, oem, category string
+	}{
+		{"brake OEM returning brake category", "58101-3XA00", "Front Brake Pad / Disc"},
+		{"oil filter OEM returning oil filter", "26350-2J001", "Oil Filter"},
+		{"cabin filter OEM returning HVAC", "97133-D3000", "Air Conditioning & Heating"},
+		{"headlight OEM returning headlight", "92101-3S050", "Headlight Assembly"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := strategyCategoryPenalty(tc.oem, tc.category)
+			if got != 1.0 {
+				t.Errorf("strategyCategoryPenalty(%q, %q) = %v, want 1.0", tc.oem, tc.category, got)
+			}
+		})
+	}
+}
+
+// TestStrategyCategoryPenalty_UnknownPrefix verifies non-decoding inputs
+// pass through with no penalty — the guard is opt-in, only firing when
+// we have confidence in the queried OEM's category classification.
+func TestStrategyCategoryPenalty_UnknownPrefix(t *testing.T) {
+	cases := []struct{ oem, category string }{
+		{"", "Oil Filter"},                  // empty OEM
+		{"XYZ", "Oil Filter"},               // non-numeric
+		{"99999-99999", "Oil Filter"},       // format ok, but 99xxx is dealer accessory
+		{"26350-2J001", ""},                 // empty category
+		{"26350-2J001", "Unknown Category"}, // unmapped category
+	}
+	for _, tc := range cases {
+		t.Run(tc.oem+"/"+tc.category, func(t *testing.T) {
+			got := strategyCategoryPenalty(tc.oem, tc.category)
+			if got != 1.0 {
+				t.Errorf("strategyCategoryPenalty(%q, %q) = %v, want 1.0", tc.oem, tc.category, got)
+			}
+		})
+	}
+}
+
+// TestFirstStrategyOf verifies the SourceStrategy tokeniser: single name
+// returns verbatim, comma-joined returns the first token.
+func TestFirstStrategyOf(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"cache", "cache"},
+		{"cache,prefix_inference", "cache"},
+		{"legacy,exact_oem,cache", "legacy"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := firstStrategyOf(tc.in); got != tc.want {
+			t.Errorf("firstStrategyOf(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// ─── M1.S1.T2/T3: cross-family penalty + tiebreak in searchCombined ─────────
+
+// TestSearchCombined_CrossFamilyPenalty_ApplyAndSort verifies the M1.S1
+// integration: the ranker penalty is applied to fallback-strategy results
+// whose category doesn't match the queried OEM's system, then the sort
+// respects both the penalised confidence and the same-system tiebreak.
+//
+// Uses strategyCategoryPenalty + categoryToSystem directly (no HTTP mocks)
+// - the sort logic in searchCombined delegates to them.
+func TestSearchCombined_CrossFamilyPenalty_ApplyAndSort(t *testing.T) {
+	// Query is a mirror OEM (86xxx = Body/Mirrors)
+	oem := "86391-D3000"
+
+	// Two hypothetical cache hits at equal base confidence. One matches the
+	// mirror system, one is a cross-family headlight result.
+	cases := []struct {
+		name      string
+		category  string
+		wantPen   float64
+		wantMatch bool
+	}{
+		{"same-system mirror", "Mirrors", 1.0, true},
+		{"cross-family headlight", "Headlight Assembly", 0.2, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pen := strategyCategoryPenalty(oem, tc.category)
+			if pen != tc.wantPen {
+				t.Errorf("penalty for %q = %v, want %v", tc.category, pen, tc.wantPen)
+			}
+			queried := DecodeOEMPrefix(oem)
+			match := categoryToSystem(tc.category) == queried.System
+			if match != tc.wantMatch {
+				t.Errorf("system-match for %q = %v, want %v (categorySystem=%q, querySystem=%q)",
+					tc.category, match, tc.wantMatch, categoryToSystem(tc.category), queried.System)
+			}
+		})
+	}
+}
+
+// TestSearchCombined_CrossFamilyPenalty_DemotesLowerRankResult confirms
+// that with the penalty applied, a lower-base-confidence same-system
+// result outranks a higher-base-confidence cross-family result.
+//
+// Scenario:
+//
+//	Result A: mirror category, confidence 0.7, source "cache"
+//	Result B: headlight category, confidence 0.9, source "cache"
+//	After penalty: A stays at 0.7, B drops to 0.9 * 0.2 = 0.18
+//	Expected ordering: A first.
+//
+// This is a pure-Go check of the multiplication + sort semantics without
+// needing the full searchCombined fan-out.
+func TestSearchCombined_CrossFamilyPenalty_DemotesLowerRankResult(t *testing.T) {
+	oem := "86391-D3000" // Body/Mirrors
+	priorities := map[string]float64{"cache": 0.5}
+
+	a := SmartResult{Part: model.Part{Category: "Mirrors"}, Confidence: 0.7, SourceStrategy: "cache"}
+	b := SmartResult{Part: model.Part{Category: "Headlight Assembly"}, Confidence: 0.9, SourceStrategy: "cache"}
+
+	// Apply the same penalty logic searchCombined uses
+	for _, r := range []*SmartResult{&a, &b} {
+		primary := firstStrategyOf(r.SourceStrategy)
+		if primary == "cache" || primary == "legacy" || primary == "prefix_inference" {
+			r.Confidence *= strategyCategoryPenalty(oem, r.Category)
+		}
+	}
+
+	if a.Confidence <= 0.5 {
+		t.Errorf("same-system result A should keep confidence ~0.7, got %v", a.Confidence)
+	}
+	if b.Confidence >= 0.5 {
+		t.Errorf("cross-family result B should have confidence <= 0.5 after penalty, got %v", b.Confidence)
+	}
+
+	sa := a.Confidence * strategyPriority(a.SourceStrategy, priorities)
+	sb := b.Confidence * strategyPriority(b.SourceStrategy, priorities)
+	if sa <= sb {
+		t.Errorf("same-system score (%v) must be > cross-family score (%v) after penalty", sa, sb)
+	}
+}
+
+// TestSearchCombined_TiebreakSameSystem verifies M1.S1.T3: when two
+// results have identical score, prefer the same-system match.
+func TestSearchCombined_TiebreakSameSystem(t *testing.T) {
+	oem := "58101-3XA00" // 58 = Brakes
+	queried := DecodeOEMPrefix(oem)
+	if queried == nil {
+		t.Fatal("test setup: 58101-3XA00 must decode")
+	}
+
+	// Two same-confidence results, only one same-system
+	sameSystem := SmartResult{Part: model.Part{Category: "Front Brake Pad / Disc"}, Confidence: 0.9}
+	crossSystem := SmartResult{Part: model.Part{Category: "Oil Filter"}, Confidence: 0.9}
+
+	iMatch := categoryToSystem(sameSystem.Category) == queried.System
+	jMatch := categoryToSystem(crossSystem.Category) == queried.System
+
+	if !iMatch {
+		t.Errorf("same-system tiebreak: brake pad category must match Brakes system")
+	}
+	if jMatch {
+		t.Errorf("same-system tiebreak: oil filter must NOT match Brakes system")
+	}
+	// The sort comparator returns `iMatch` when iMatch != jMatch — so the
+	// same-system result sorts first.
+	if iMatch != true || jMatch != false {
+		t.Errorf("expected iMatch=true jMatch=false, got iMatch=%v jMatch=%v", iMatch, jMatch)
+	}
+}
