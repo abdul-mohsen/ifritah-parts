@@ -14,10 +14,10 @@ import (
 // when the format or prefix does not match the HK convention, return zero
 // results with an honest, actionable message rather than a fabricated hit.
 type HKScopeResult struct {
-	IsHK           bool   // true when the number matches HK format AND has a known HK prefix
-	Format         string // "hk_5_5" | "hk_5_5_dashed" | "hk_generic" | "unknown"
-	SuggestedMake  string // best-effort guess for the make when the OEM is NOT HK (empty if unknown)
-	Reason         string // one-line human-readable explanation for logging + user warning
+	IsHK          bool   // true when the number matches HK format AND has a known HK prefix
+	Format        string // "hk_5_5" | "hk_5_5_dashed" | "hk_generic" | "unknown"
+	SuggestedMake string // best-effort guess for the make when the OEM is NOT HK (empty if unknown)
+	Reason        string // one-line human-readable explanation for logging + user warning
 }
 
 // Strict HK format:
@@ -27,35 +27,155 @@ type HKScopeResult struct {
 // Examples that DO NOT MATCH: 90915-YZZE1 (Toyota, 5-5 alphanumeric but wrong
 // prefix), 11-42-7-509-125 (BMW), AL3Z-6584-A (Ford), 90111-06153 (Nissan).
 var hkOEMFormatDashed = regexp.MustCompile(`^\d{5}-[A-Z0-9]{5}$`)
-var hkOEMFormatFlat   = regexp.MustCompile(`^\d{5}[A-Z0-9]{5}$`)
+var hkOEMFormatFlat = regexp.MustCompile(`^\d{5}[A-Z0-9]{5}$`)
 
-// Non-HK make hints — high-signal starting fragments that let us suggest a
-// specific competitor make when we reject the query. Keep this deny-list
-// tight; a false positive here just means we lose the polite hint, not that
-// we surface bad data.
+// Non-HK make hints — high-signal starting fragments that let us reject the
+// query with a specific competitor make suggestion. Widened in M1.S2 after
+// the 2026-08-23 audit showed 38 of 100 non-HK OEMs leaked through the
+// guard when their prefixes had no deny-list entry.
+//
+// Keep entries tight; a false positive here rejects a valid query. When a
+// candidate prefix collides with a real HK prefix (e.g. 44xxx = HK
+// Transmission Control), leave it out.
 var nonHKMakeHints = []struct {
 	prefixNormalized string
 	make             string
 }{
-	// Toyota part numbers: 90915-YZZE1 (filter), 44001-06110, 42431-08040, etc.
-	// Toyota also uses 90xxx-YZZxx family for oil filters, and 43xxx / 44xxx
-	// for suspension. Since 43xx and 44xx collide with HK "43" transmission,
-	// we only surface Toyota when the pattern is 909xx-YZZ.
+	// ─── Toyota ───────────────────────────────────────────────────────
+	// 90915-YZZxx family = oil filters; 90080-* = fasteners; 90118-* =
+	// bolts; 88310-* = A/C compressor. 43xxx/44xxx collide with HK
+	// transmission — deliberately omitted.
 	{"90915", "Toyota"},
 	{"9091", "Toyota"},
 	{"9091514", "Toyota"},
-	// BMW/Mini: 11-42-xxx patterns; prefixes 07, 11, 13, 17.
+	{"90080", "Toyota"},
+	{"90118", "Toyota"},
+	{"88310", "Toyota"},
+	{"87139", "Toyota"}, // cabin filter
+	{"04152", "Toyota"}, // oil filter kit
+	{"04466", "Toyota"}, // brake pad shim
+
+	// ─── BMW / Mini ───────────────────────────────────────────────────
+	// BMW OEMs are 11-42-* / 07-11-* / 13-71-* — full dash form matches
+	// none of our HK regexes; the deny-list is the ONLY defence.
 	{"11427", "BMW"},
 	{"11421", "BMW"},
+	{"11427634292", "BMW"}, // specific oil filter housing
 	{"07119", "BMW"},
-	// Nissan: 15208-xxxxx (oil filter), 22448-xxxxx (coil), etc.
+	{"07129", "BMW"},
+	{"13717", "BMW"}, // air filter housing
+	{"13718", "BMW"},
+	{"34116", "BMW"}, // front brake pad
+	{"34216", "BMW"}, // rear brake pad
+	{"64119", "BMW"}, // cabin filter
+
+	// ─── Nissan / Infiniti ────────────────────────────────────────────
 	{"15208", "Nissan"},
 	{"22448", "Nissan"},
-	// Honda: 15400-xxxxx (oil filter), 17220-xxxxx (air filter).
+	{"16546", "Nissan"}, // air filter
+	{"27891", "Nissan"}, // cabin filter
+	{"41060", "Nissan"}, // front brake pad
+	{"D4060", "Nissan"}, // rear brake pad
+	{"D1060", "Nissan"}, // brake pad variant
+
+	// ─── Honda / Acura ────────────────────────────────────────────────
 	{"15400", "Honda"},
 	{"17220", "Honda"},
-	// Mazda/Ford non-latin prefixes are covered by the format regex rejecting
-	// alpha starts (Ford AL3Z-…, Mazda LF01-…).
+	{"80292", "Honda"}, // cabin filter
+	{"45022", "Honda"}, // front brake pad
+	{"43022", "Honda"}, // rear brake pad
+	{"31500", "Honda"}, // battery
+
+	// ─── Ford / Lincoln / Mercury ─────────────────────────────────────
+	// Ford OEMs often start with alpha (AL3Z, BR3Z, EL3Z) — the format
+	// regex rejects those. Numeric Ford prefixes covered here.
+	{"1S7G", "Ford"},
+	{"3S71", "Ford"},
+	{"4F27", "Ford"},
+	{"AL3Z", "Ford"},
+	{"BR3Z", "Ford"},
+	{"EL3Z", "Ford"},
+	{"F5EX", "Ford"},
+
+	// ─── GM / Chevrolet / Cadillac / GMC ──────────────────────────────
+	{"12345678", "Chevrolet"}, // ACDelco pattern
+	{"19", "Chevrolet"},
+	{"88970", "Chevrolet"},
+	{"22886", "Chevrolet"},
+	{"25190", "Chevrolet"},
+
+	// ─── Peugeot / Citroen (Stellantis PSA) ───────────────────────────
+	{"9803", "Peugeot"},
+	{"9804", "Peugeot"},
+	{"1109", "Peugeot"}, // oil filter
+	{"1613", "Peugeot"},
+
+	// ─── Renault / Dacia / Nissan (RNA) ───────────────────────────────
+	{"7700", "Renault"},
+	{"8200", "Renault"},
+	{"7701", "Renault"},
+
+	// ─── Fiat / Alfa / Chrysler / Jeep (Stellantis) ──────────────────
+	{"6803", "Chrysler"},
+	{"6805", "Chrysler"},
+	{"6810", "Chrysler"},
+	{"6820", "Chrysler"},
+	{"6830", "Chrysler"},
+	{"5104", "Chrysler"},
+
+	// ─── Mitsubishi ───────────────────────────────────────────────────
+	{"MD", "Mitsubishi"},
+	{"MR", "Mitsubishi"},
+	{"MB", "Mitsubishi"},
+	{"MN", "Mitsubishi"},
+
+	// ─── Mazda ────────────────────────────────────────────────────────
+	// Mazda uses alpha prefixes (LF01-*, KL01-*, RF7A-*) that the format
+	// regex rejects; but LFY1 / KLY4 dashless forms may pass — deny.
+	{"LF", "Mazda"},
+	{"KL", "Mazda"},
+	{"RF", "Mazda"},
+	{"NF", "Mazda"},
+
+	// ─── Volkswagen / Audi / Skoda / Seat (VAG) ──────────────────────
+	{"06A", "Volkswagen"},
+	{"06B", "Volkswagen"},
+	{"06D", "Volkswagen"},
+	{"06E", "Volkswagen"},
+	{"06J", "Volkswagen"},
+	{"03C", "Volkswagen"},
+	{"03D", "Volkswagen"},
+	{"03L", "Volkswagen"},
+
+	// ─── Volvo ────────────────────────────────────────────────────────
+	{"31261", "Volvo"},
+	{"31267", "Volvo"},
+	{"30637", "Volvo"},
+	{"30748", "Volvo"},
+
+	// ─── Land Rover / Jaguar ──────────────────────────────────────────
+	{"LR0", "Land Rover"},
+	{"LR1", "Land Rover"},
+	{"C2Z", "Jaguar"},
+	{"C2P", "Jaguar"},
+
+	// ─── Mercedes-Benz ────────────────────────────────────────────────
+	{"A000", "Mercedes-Benz"},
+	{"A001", "Mercedes-Benz"},
+	{"A002", "Mercedes-Benz"},
+	{"A166", "Mercedes-Benz"},
+	{"A278", "Mercedes-Benz"},
+	{"0001", "Mercedes-Benz"},
+
+	// ─── Subaru ───────────────────────────────────────────────────────
+	{"15208AA", "Subaru"},
+	{"16546AA", "Subaru"},
+	{"26696", "Subaru"},
+
+	// Note: Ford/Mazda alpha-first prefixes are ALSO covered by the
+	// format regex rejection (hkOEMFormatDashed requires digits first).
+	// This deny-list catches the dashless / partial forms that slip
+	// through the regex.
 }
 
 // IsHKOEM classifies whether a query is a Hyundai/Kia OEM part number.
@@ -77,6 +197,33 @@ func IsHKOEM(rawOEM string) HKScopeResult {
 	// format regexes look at it explicitly. `26300 - 35505` → `26300-35505`.
 	compact := strings.ReplaceAll(trimmed, " ", "")
 
+	// M1.S2.T1: check the deny-list FIRST, before the format regex.
+	// Prevents non-HK prefixes that HAPPEN to match an HK format from
+	// getting classified as HK (e.g. Peugeot 9803* → "98" is an HK
+	// Maintenance prefix, so pre-fix code took the HK branch; the
+	// deny-list correctly identifies Peugeot but the branch never
+	// reached it). Deny-list entries are canonical non-HK — always win.
+	normalizedUpper := strings.ToUpper(NormalizeOEM(compact))
+	for _, hint := range nonHKMakeHints {
+		if strings.HasPrefix(normalizedUpper, strings.ToUpper(hint.prefixNormalized)) {
+			// Set format for observability — some deny-listed OEMs match
+			// the HK 5-5 form; recording that helps future debugging.
+			format := "unknown"
+			switch {
+			case hkOEMFormatDashed.MatchString(compact):
+				format = "hk_5_5_dashed"
+			case hkOEMFormatFlat.MatchString(compact):
+				format = "hk_5_5"
+			}
+			return HKScopeResult{
+				IsHK:          false,
+				Format:        format,
+				SuggestedMake: hint.make,
+				Reason:        "This app searches Hyundai/Kia parts only. This OEM looks like a " + hint.make + " part.",
+			}
+		}
+	}
+
 	format := "unknown"
 	switch {
 	case hkOEMFormatDashed.MatchString(compact):
@@ -85,20 +232,8 @@ func IsHKOEM(rawOEM string) HKScopeResult {
 		format = "hk_5_5"
 	}
 
-	// Not the HK 5-5 pattern — try to suggest a make from the deny-list.
+	// Not the HK 5-5 pattern and not in the deny-list — return unknown.
 	if format == "unknown" {
-		normalized := NormalizeOEM(compact) // strips dashes, dots, slashes, spaces; lowercases
-		normalizedUpper := strings.ToUpper(normalized)
-		for _, hint := range nonHKMakeHints {
-			if strings.HasPrefix(normalizedUpper, strings.ToUpper(hint.prefixNormalized)) {
-				return HKScopeResult{
-					IsHK:          false,
-					Format:        "unknown",
-					SuggestedMake: hint.make,
-					Reason:        "This app searches Hyundai/Kia parts only. This OEM looks like a " + hint.make + " part.",
-				}
-			}
-		}
 		return HKScopeResult{
 			IsHK:   false,
 			Format: "unknown",
@@ -111,20 +246,6 @@ func IsHKOEM(rawOEM string) HKScopeResult {
 	// It returns nil for prefixes that Hyundai/Kia does not use (e.g. Toyota "90").
 	prefixCat := DecodeOEMPrefix(compact)
 	if prefixCat == nil {
-		// Format looks HK-like but prefix is unknown to us. Try the
-		// suggested-make deny-list once more in case the prefix collides
-		// with a non-HK numbering scheme we know about.
-		normalizedUpper := strings.ToUpper(NormalizeOEM(compact))
-		for _, hint := range nonHKMakeHints {
-			if strings.HasPrefix(normalizedUpper, strings.ToUpper(hint.prefixNormalized)) {
-				return HKScopeResult{
-					IsHK:          false,
-					Format:        format,
-					SuggestedMake: hint.make,
-					Reason:        "This app searches Hyundai/Kia parts only. This OEM prefix belongs to " + hint.make + ".",
-				}
-			}
-		}
 		return HKScopeResult{
 			IsHK:   false,
 			Format: format,
