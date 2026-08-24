@@ -14,6 +14,7 @@ param(
   [string]$OutputDir      = "C:\Users\ALMAAB~1\AppData\Local\Temp\opencode",
   [string]$Endpoint       = "https://qa.ifritah.com",
   [string]$Mode           = "combined",
+  [string[]]$Modes        = @(),
   [string]$EnrichmentLevel= "full",
   [int]$ThrottleLimit     = 4,
   [int]$MaxTimeoutS       = 25,
@@ -28,15 +29,20 @@ if (-not (Test-Path $InputCorpus)) {
   exit 1
 }
 
+# If -Modes is empty, fall back to the single -Mode value. Multi-mode means
+# every OEM x every mode = big cartesian; useful for per-strategy F1 matrix.
+$modesToRun = if ($Modes.Count -gt 0) { $Modes } else { @($Mode) }
+
 $dateStamp = Get-Date -Format "yyyy-MM-dd_HHmm"
 $outputFile = Join-Path $OutputDir "qa-quality-raw-$dateStamp.csv"
 $logFile    = Join-Path $OutputDir "qa-quality-raw-$dateStamp.log"
 
 $corpus = Import-Csv $InputCorpus
-$total  = $corpus.Count
-Write-Host "Corpus:     $InputCorpus ($total rows)"
+$totalOems = $corpus.Count
+$totalReq  = $totalOems * $modesToRun.Count
+Write-Host "Corpus:     $InputCorpus ($totalOems OEMs)"
 Write-Host "Endpoint:   $Endpoint"
-Write-Host "Mode:       $Mode"
+Write-Host "Modes:      $($modesToRun -join ', ') ($($modesToRun.Count) modes -> $totalReq requests)"
 Write-Host "Enrichment: $EnrichmentLevel"
 Write-Host "Workers:    $ThrottleLimit (throttle+delay tuned for full enrichment)"
 Write-Host "Timeout:    ${MaxTimeoutS}s"
@@ -53,16 +59,28 @@ foreach ($k in @("done","hits","timeouts","429","parse_err","enriched_am","enric
 
 $sw_total = [System.Diagnostics.Stopwatch]::StartNew()
 
-$corpus | ForEach-Object -Parallel {
-  $row       = $_
+# Fan out corpus x modes into one flat request stream so per-worker parallelism
+# is uniform across modes (avoids one mode monopolising the workers).
+$requests = foreach ($row in $corpus) {
+  foreach ($m in $modesToRun) {
+    [PSCustomObject]@{
+      Row  = $row
+      Mode = $m
+    }
+  }
+}
+
+$requests | ForEach-Object -Parallel {
+  $reqWrap   = $_
+  $row       = $reqWrap.Row
+  $mode      = $reqWrap.Mode
   $endpoint  = $using:Endpoint
-  $mode      = $using:Mode
   $enrichLvl = $using:EnrichmentLevel
   $timeoutS  = $using:MaxTimeoutS
   $delayMs   = $using:InterRequestMs
   $maxRetry  = $using:MaxRetries
   $counter   = $using:counter
-  $totalReq  = $using:total
+  $totalReq  = $using:totalReq
   $workerDir = $using:workerDir
 
   Add-Type -AssemblyName System.Web -EA SilentlyContinue

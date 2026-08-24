@@ -14,6 +14,7 @@ Every task follows the template:
 
 | File | Milestone | Sprints | Tasks |
 |---|---|---:|---:|
+| [`M0-fix-broken-strategies.md`](M0-fix-broken-strategies.md) | M0 — Fix broken strategies (prereq) | 1 | 7 |
 | [`M1-correctness.md`](M1-correctness.md) | M1 — Correctness first | 3 | 8 |
 | [`M2-richness.md`](M2-richness.md) | M2 — Rich alternatives | 3 | 6 |
 | [`M3-enrichment.md`](M3-enrichment.md) | M3 — Full enrichment | 2 | 4 |

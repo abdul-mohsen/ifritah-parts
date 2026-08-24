@@ -40,6 +40,7 @@ Each milestone ships a measurable slice of the north-star. Every milestone ends 
 
 | # | Milestone | Success gate | Estimated sprints |
 |---|---|---|---:|
+| **M0** | **Fix broken strategies** — 5 of 13 return 0 hits today | `owned_catalog`, `supersession`, `vin_assembly`, `vehicle_fitment` all F1_correct ≥ 0.40 on relevant slices | 1 (7 tasks) |
 | M1 | **No wrong parts** — correctness first | `F1_correct ≥ 0.95` overall, ≥ 0.98 seeded | 3 |
 | M2 | **Rich alternatives** — five or more per wear part | `AvgAM_correct ≥ 5` on wear parts, `F1_rich5 ≥ 0.60` | 3 |
 | M3 | **Full enrichment** — specs / vehicles / supersession populated | ≥ 80% of correct hits have specs, ≥ 60% vehicles, ≥ 40% supersession | 2 |
@@ -47,7 +48,9 @@ Each milestone ships a measurable slice of the north-star. Every milestone ends 
 | M5 | **Search intelligence** — semantic, VIN, cross-suggest | VIN → parts F1 ≥ 0.80; description-similarity recall + 10 pts on unseeded slice | 3 |
 | M6 | **Production-grade** — continuous audit CI, feedback loop, cost SLA | Every PR blocked if F1_correct regresses; p95 ≤ 3 s; monthly cost audit | 2 |
 
-Total: **17 sprints** (~8-10 months at 1 sprint/2 weeks).
+Total: **18 sprints** (~8-11 months at 1 sprint / 2 weeks).
+
+**Merge order matters.** M0 unblocks the strategies that M2 (`supersession` walker), M3 (`vehicle_fitment` for vehicle enrichment), and M5 (`vin_assembly`) will build on. Skip M0 and the later milestones are building on broken foundations.
 
 ---
 

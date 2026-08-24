@@ -52,6 +52,8 @@ $dateStamp = Get-Date -Format "yyyy-MM-dd_HHmm"
 $catFile   = Join-Path $OutputDir "qa-quality-by-category-$dateStamp.csv"
 $sysFile   = Join-Path $OutputDir "qa-quality-by-system-$dateStamp.csv"
 $sliceFile = Join-Path $OutputDir "qa-quality-by-slice-$dateStamp.csv"
+$stratFile = Join-Path $OutputDir "qa-quality-by-strategy-$dateStamp.csv"
+$stratSliceFile = Join-Path $OutputDir "qa-quality-by-strategy-slice-$dateStamp.csv"
 $failFile  = Join-Path $OutputDir "qa-quality-failures-$dateStamp.csv"
 $summFile  = Join-Path $OutputDir "qa-quality-summary-$dateStamp.txt"
 
@@ -272,6 +274,49 @@ $sliceRows = $classified | Group-Object Slice | ForEach-Object {
 $sliceRows | Export-Csv $sliceFile -Encoding utf8 -NoTypeInformation
 Write-Host "Wrote per-slice CSV:    $sliceFile"
 
+# Per-strategy — treats Mode column as the strategy identifier. Enables
+# per-strategy F1 matrix across the corpus so we can see which strategies
+# are pulling their weight (cache/legacy/exact_oem) vs which are broken
+# (owned_catalog/supersession/vin_assembly at time of writing).
+$stratRows = $classified | Group-Object Mode | ForEach-Object {
+  $g = $_.Group
+  $m = Compute-Metrics $g
+  [PSCustomObject]@{
+    Strategy          = $_.Name
+    N                 = $g.Count
+    F1_hit            = $m.Hit.F1
+    F1_correct        = $m.Correct.F1
+    AvgRepl_correct   = $m.AvgRepl
+    AvgAM_correct     = $m.AvgAM
+    AvgOEMxRef_correct= $m.AvgOEMx
+    F1_rich5          = $m.Rich5.F1
+    F1_rich10         = $m.Rich10.F1
+  }
+} | Sort-Object F1_correct -Descending
+$stratRows | Export-Csv $stratFile -Encoding utf8 -NoTypeInformation
+Write-Host "Wrote per-strategy CSV: $stratFile ($($stratRows.Count) strategies)"
+
+# Per-strategy × per-slice matrix. Answers "which strategy handles which
+# corpus segment best?" — the map that guides per-strategy improvement
+# tasks in M0.
+$stratSliceRows = $classified | Group-Object Mode, Slice | ForEach-Object {
+  $g = $_.Group
+  $m = Compute-Metrics $g
+  $mode = $g[0].Mode
+  $slice = $g[0].Slice
+  [PSCustomObject]@{
+    Strategy         = $mode
+    Slice            = $slice
+    N                = $g.Count
+    F1_hit           = $m.Hit.F1
+    F1_correct       = $m.Correct.F1
+    AvgRepl_correct  = $m.AvgRepl
+    F1_rich5         = $m.Rich5.F1
+  }
+} | Sort-Object Strategy, Slice
+$stratSliceRows | Export-Csv $stratSliceFile -Encoding utf8 -NoTypeInformation
+Write-Host "Wrote per-strategy x per-slice CSV: $stratSliceFile"
+
 # Failures = anything that missed F1_correct OR was correct but replTotal < 3
 $failures = $classified | Where-Object {
   $_.CorrectClass -in @("FN","FP") -or ($_.CorrectClass -eq "TP" -and $_.ReplTotal -lt 3)
@@ -319,6 +364,12 @@ $($classified | Group-Object GroundTruth | ForEach-Object { "  {0,-18} n={1}" -f
 
 --- Per-slice ---
 $($sliceRows | Format-Table -AutoSize | Out-String)
+
+--- Per-strategy (all rows, all slices) ---
+$($stratRows | Format-Table -AutoSize | Out-String)
+
+--- Per-strategy x per-slice (top interactions) ---
+$($stratSliceRows | Sort-Object F1_correct -Descending | Select-Object -First 25 | Format-Table -AutoSize | Out-String)
 
 --- Per-category, top 15 by average replacements (n_exists >= 5) ---
 $($topByRepl | Format-Table -AutoSize | Out-String)
