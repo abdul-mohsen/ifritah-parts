@@ -31,7 +31,22 @@ if (-not (Test-Path $InputCorpus)) {
 
 # If -Modes is empty, fall back to the single -Mode value. Multi-mode means
 # every OEM x every mode = big cartesian; useful for per-strategy F1 matrix.
-$modesToRun = if ($Modes.Count -gt 0) { $Modes } else { @($Mode) }
+# Accept either a proper array (-Modes a,b,c) OR a comma-joined single
+# string (-Modes "a,b,c") — Start-Process -ArgumentList sometimes passes
+# it as one string; split defensively.
+$modesToRun = if ($Modes.Count -gt 0) {
+  $flat = @()
+  foreach ($m in $Modes) {
+    if ($m -match ",") {
+      $flat += ($m -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    } else {
+      $flat += $m.Trim()
+    }
+  }
+  $flat
+} else {
+  @($Mode)
+}
 
 $dateStamp = Get-Date -Format "yyyy-MM-dd_HHmm"
 $outputFile = Join-Path $OutputDir "qa-quality-raw-$dateStamp.csv"
