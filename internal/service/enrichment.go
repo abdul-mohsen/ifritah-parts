@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
+
+	"parts-engine/internal/model"
 )
 
 // enrichmentBudget is the outer wall-clock deadline for the entire
@@ -177,10 +180,10 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if amParts, err := s.tecdoc.FindAftermarketForOEM(oem); err == nil {
 					existing := make(map[string]bool, len(enriched.AftermarketAlternatives))
 					for _, p := range enriched.AftermarketAlternatives {
-						existing[p.Brand+"|"+p.PartNumber] = true
+						existing[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
 					}
 					for _, p := range amParts {
-						key := p.Brand + "|" + p.PartNumber
+						key := NormalizeBrand(p.Brand) + "|" + strings.ToLower(p.PartNumber)
 						if !existing[key] {
 							enriched.AftermarketAlternatives = append(enriched.AftermarketAlternatives, p)
 							existing[key] = true
@@ -229,10 +232,88 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				}
 			}
 
-			// Full only: supersession chain (superseded / successor OEMs)
+			// Full only: supersession chain (superseded / successor OEMs).
+			// M2.S3.T2: every link in the chain also becomes an
+			// OEMReference in the result's OEMNumbers list so parts
+			// sellers can order any variant. Tagged Manufacturer =
+			// "SUPERSESSION" so downstream deduping doesn't confuse
+			// them with primary cross-refs.
+			//
+			// M2.S1.T2: also fetch aftermarket for every OEM in the
+			// chain. Widens the aftermarket net by including brands
+			// cataloged against the parent/child OEM (a Bosch filter
+			// listed as fitting the SUPERSEDED OEM should surface for
+			// the current OEM too).
 			if s.tecDocSuper != nil && budgetLeft() {
 				if chain, err := s.tecDocSuper.FindSupersession(articleId); err == nil {
 					enriched.Supersession = &chain
+					existing := make(map[string]bool, len(enriched.OEMNumbers))
+					for _, r := range enriched.OEMNumbers {
+						existing[strings.ToUpper(r.ArticleNumber)] = true
+					}
+					chainOEMs := make([]string, 0, len(chain.ReplacedBy)+len(chain.Replaces))
+					for _, link := range chain.ReplacedBy {
+						an := strings.ToUpper(link.ArticleNumber)
+						if an == "" || existing[an] {
+							continue
+						}
+						existing[an] = true
+						enriched.OEMNumbers = append(enriched.OEMNumbers, model.OEMReference{
+							RawNumber:       link.ArticleNumber,
+							ArticleNumber:   link.ArticleNumber,
+							Description:     link.Description,
+							BrandName:       link.BrandName,
+							LegacyArticleId: link.LegacyArticleId,
+							Manufacturer:    "SUPERSESSION",
+						})
+						chainOEMs = append(chainOEMs, link.ArticleNumber)
+					}
+					for _, link := range chain.Replaces {
+						an := strings.ToUpper(link.ArticleNumber)
+						if an == "" || existing[an] {
+							continue
+						}
+						existing[an] = true
+						enriched.OEMNumbers = append(enriched.OEMNumbers, model.OEMReference{
+							RawNumber:       link.ArticleNumber,
+							ArticleNumber:   link.ArticleNumber,
+							Description:     link.Description,
+							BrandName:       link.BrandName,
+							LegacyArticleId: link.LegacyArticleId,
+							Manufacturer:    "SUPERSESSION",
+						})
+						chainOEMs = append(chainOEMs, link.ArticleNumber)
+					}
+
+					// M2.S1.T2: fetch aftermarket for each chain OEM
+					// and union into AftermarketAlternatives. Bounded
+					// to 5 chain OEMs so we don't fan out unbounded.
+					if len(chainOEMs) > 5 {
+						chainOEMs = chainOEMs[:5]
+					}
+					if s.tecdoc != nil && len(chainOEMs) > 0 && budgetLeft() {
+						amExisting := make(map[string]bool, len(enriched.AftermarketAlternatives))
+						for _, p := range enriched.AftermarketAlternatives {
+							amExisting[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
+						}
+						for _, chainOEM := range chainOEMs {
+							if !budgetLeft() {
+								break
+							}
+							amParts, aerr := s.tecdoc.FindAftermarketForOEM(chainOEM)
+							if aerr != nil {
+								continue
+							}
+							for _, p := range amParts {
+								key := NormalizeBrand(p.Brand) + "|" + strings.ToLower(p.PartNumber)
+								if amExisting[key] {
+									continue
+								}
+								amExisting[key] = true
+								enriched.AftermarketAlternatives = append(enriched.AftermarketAlternatives, p)
+							}
+						}
+					}
 				}
 			}
 
