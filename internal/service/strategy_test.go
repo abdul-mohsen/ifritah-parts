@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -1008,5 +1009,31 @@ func TestSearchCombined_TiebreakSameSystem(t *testing.T) {
 	// same-system result sorts first.
 	if iMatch != true || jMatch != false {
 		t.Errorf("expected iMatch=true jMatch=false, got iMatch=%v jMatch=%v", iMatch, jMatch)
+	}
+}
+
+// TestSearchCombined_ConfidenceFloor - M1.S2.T2 regression test for the
+// solo-cache low-confidence drop.
+func TestSearchCombined_ConfidenceFloor(t *testing.T) {
+	cases := []struct {
+		name       string
+		result     SmartResult
+		shouldDrop bool
+	}{
+		{"solo cache low conf - drops", SmartResult{Confidence: 0.3, SourceStrategy: "cache"}, true},
+		{"solo cache high conf - passes", SmartResult{Confidence: 0.9, SourceStrategy: "cache"}, false},
+		{"corroborated low conf - passes", SmartResult{Confidence: 0.3, SourceStrategy: "cache,prefix_inference"}, false},
+		{"legacy solo low conf - passes", SmartResult{Confidence: 0.3, SourceStrategy: "legacy"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			primary := firstStrategyOf(tc.result.SourceStrategy)
+			isSoloCache := primary == "cache" && !strings.Contains(tc.result.SourceStrategy, ",")
+			dropped := isSoloCache && tc.result.Confidence < 0.5
+			if dropped != tc.shouldDrop {
+				t.Errorf("shouldDrop=%v got=%v (SourceStrategy=%q conf=%v)",
+					tc.shouldDrop, dropped, tc.result.SourceStrategy, tc.result.Confidence)
+			}
+		})
 	}
 }

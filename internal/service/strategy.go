@@ -421,6 +421,31 @@ collectLoop:
 		}
 	}
 
+	// M1.S2.T2: confidence floor for solo-cache low-conf hits. A single
+	// cache-only hit with confidence < 0.5 and no corroboration from any
+	// other strategy is almost always stale garbage (an old row for an
+	// unrelated part that shares a prefix). Drop it - keeps combined
+	// results tight when the cache is dirty. Multi-strategy hits pass
+	// through regardless of confidence (the corroboration itself is
+	// evidence of correctness).
+	if len(results) > 0 {
+		filtered := results[:0]
+		dropped := 0
+		for _, r := range results {
+			primary := firstStrategyOf(r.SourceStrategy)
+			isSoloCache := primary == "cache" && !strings.Contains(r.SourceStrategy, ",")
+			if isSoloCache && r.Confidence < 0.5 {
+				dropped++
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		if dropped > 0 {
+			log.Printf("[Combined] dropped %d solo-cache low-conf hit(s) for oem=%q", dropped, req.OEM)
+		}
+		results = filtered
+	}
+
 	// M1.S1.T2: cross-family confidence penalty. When a result surfaced by a
 	// fallback strategy (cache / legacy / prefix_inference) has a category
 	// whose parent system does NOT match the queried OEM prefix's expected
