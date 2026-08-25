@@ -101,6 +101,28 @@ FROM ambrand
 WHERE lang = 'en'
 LIMIT 10;
 
+-- articlecriteria columns — confirms whether criteriaDescription + rawValue
+-- are TEXT (need index prefix length) or VARCHAR (can index directly).
+-- The 2026-08-26 sql/08 migration hit ERROR 1170 on this table, which
+-- means at least one of these columns is TEXT/BLOB.
+SELECT '--- articlecriteria columns (index-prefix implications) ---' AS note;
+
+SELECT
+	COLUMN_NAME,
+	DATA_TYPE,
+	CHARACTER_MAXIMUM_LENGTH,
+	IS_NULLABLE,
+	COLUMN_KEY,
+	CASE
+		WHEN DATA_TYPE IN ('text','mediumtext','longtext','tinytext','blob') THEN 'NEEDS_PREFIX'
+		WHEN DATA_TYPE IN ('varchar','char') THEN 'DIRECT_INDEXABLE'
+		ELSE 'N/A'
+	END AS index_treatment
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'articlecriteria'
+ORDER BY ORDINAL_POSITION;
+
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FIX-4 - oem_number HK COVERAGE (JOIN-free)
