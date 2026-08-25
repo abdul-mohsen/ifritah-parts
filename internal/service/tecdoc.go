@@ -575,6 +575,75 @@ func scanAftermarketRows(rows *sql.Rows) []model.AftermarketPart {
 
 // ---------- Vehicle resolution ----------
 
+// LinkageTargetsForNHTSA resolves an NHTSA-decoded vehicle (make + model +
+// year) to a set of matching TecDoc linkageTargetIds. Powers M5.S2.T2:
+// VIN → parts pipeline. Two-step lookup:
+//
+//  1. manuId lookup on manufacturers table (make name is upper-cased, e.g.
+//     "HYUNDAI" -> manuId)
+//  2. modelseries → linkagetargets join with LIKE-fuzzy model match + year
+//     filter (beginYearMonth <= year*100+12 AND endYearMonth >= year*100+1
+//     OR endYearMonth = 0)
+//
+// Fuzzy model match uses `LIKE %model%` on the exact NHTSA model string.
+// Some NHTSA models don't exactly match TecDoc's naming (e.g. "Elantra"
+// vs "ELANTRA (HD)"), so LIKE catches both. Caller should sort results
+// by year-range proximity and pick the top-N.
+//
+// Returns [] when no match; empty is not an error.
+// Bounded to 20 linkage targets so a bad match doesn't fan out unbounded.
+func (t *TecDoc) LinkageTargetsForNHTSA(makeName, modelName string, year int) ([]int, error) {
+	if t.db == nil {
+		return nil, nil
+	}
+	if makeName == "" || modelName == "" || year == 0 {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const q = `
+		SELECT DISTINCT lt.linkageTargetId
+		FROM linkagetargets lt
+		JOIN modelseries ms ON lt.vehicleModelSeriesId = ms.modelId
+		JOIN manufacturers m ON m.manuId = ms.manuId
+		WHERE UPPER(m.manuName) LIKE UPPER(?)
+		  AND UPPER(ms.modelname) LIKE UPPER(?)
+		  AND ms.linkingTargetType = 'P'
+		  AND lt.lang = 'en'
+		  AND (
+		    (lt.beginYearMonth <= ? AND lt.endYearMonth = 0)
+		    OR
+		    (lt.beginYearMonth <= ? AND lt.endYearMonth >= ?)
+		  )
+		LIMIT 20`
+
+	makeLike := "%" + strings.ToUpper(makeName) + "%"
+	modelLike := "%" + strings.ToUpper(modelName) + "%"
+	yearEnd := year*100 + 12  // Dec of the target year
+	yearStart := year*100 + 1 // Jan of the target year
+
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.LinkageTargetsForNHTSA", q,
+		makeLike, modelLike, yearEnd, yearEnd, yearStart)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
 // ResolveVehicle finds TecDoc vehicle variants by make/model/year via modelseries+linkagetargets.
 func (t *TecDoc) ResolveVehicle(manuId int, modelPattern string, year int) ([]model.Vehicle, error) {
 	query := `

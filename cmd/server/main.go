@@ -135,6 +135,7 @@ func main() {
 	oemLookup := service.NewOEMLookup(pg)
 	supersession := service.NewSupersession(pg)
 	relatedParts := service.NewRelatedParts(pg)
+	feedback := service.NewFeedbackService(pg)
 	platform := service.NewPlatform(pg)
 	recalls := service.NewRecallsClient(cfg.NHTSARecallsURL)
 	crossRef := service.NewCrossRef(pg, false)
@@ -233,6 +234,8 @@ func main() {
 	oemH.SetPartsLookup(partsLookup)
 	superH := handler.NewSupersessionHandler(supersession)
 	relatedPartsH := handler.NewRelatedPartsHandler(relatedParts)
+	vinPartsH := handler.NewVINPartsHandler(vinDecoder, tecdoc)
+	feedbackH := handler.NewFeedbackHandler(feedback)
 	recallsH := handler.NewRecallsHandler(recalls)
 	searchH := handler.NewSearchHandler(smartSearch)
 	catalogH := handler.NewCatalogHandler(partsLookup, crossRef)
@@ -283,6 +286,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.POST("/vin/decode", vinH.Decode)
+		api.GET("/vin/:vin/parts", vinPartsH.Get)
 		api.GET("/vehicle/:id/parts", partsH.ByVehicle)
 		api.GET("/vehicle/:id/categories", searchH.Categories)
 		api.GET("/vehicle/:id/engine", partsH.Engine)
@@ -295,6 +299,7 @@ func main() {
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/parts/related", relatedPartsH.Get)
+		api.POST("/search/feedback", feedbackH.Submit)
 		api.GET("/recalls", recallsH.ByVIN)
 		// Rate-limited: 100 requests/min sustained, burst 20 per client IP.
 		// Applied only to /api/search (not /search/modes which is cheap).
