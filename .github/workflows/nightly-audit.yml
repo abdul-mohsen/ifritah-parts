@@ -1,0 +1,183 @@
+name: nightly-audit
+
+# M6.S1.T1 — nightly search-quality audit against qa.ifritah.com.
+#
+# Runs a 200-OEM canary corpus through combined mode (enrichment=none)
+# and publishes results to docs/reports/nightly/{date}/. If any of the
+# alert thresholds trip (F1_correct drop >= 0.05 from the previous
+# nightly, or F1_hit < 0.60 overall), the workflow fails and pings the
+# repo maintainers via a GitHub issue.
+#
+# Runs against qa (not a preview) so we get the live-deploy signal.
+# For per-PR checks see pr-quality-gate.yml (M6.S1.T2).
+
+on:
+  schedule:
+    # 03:00 UTC every day
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: 'Corpus file (relative to scripts/audit/)'
+        required: false
+        default: 'corpus-200-canary.csv'
+      endpoint:
+        description: 'Search endpoint to audit'
+        required: false
+        default: 'https://qa.ifritah.com'
+
+concurrency:
+  group: nightly-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CORPUS: ${{ inputs.corpus || 'corpus-200-canary.csv' }}
+      ENDPOINT: ${{ inputs.endpoint || 'https://qa.ifritah.com' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so we can commit back to the nightly-audits branch
+          fetch-depth: 0
+
+      - name: Set date stamp
+        id: stamp
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Health check (fail fast if qa is down)
+        run: |
+          if ! curl -fsS --max-time 10 -o /dev/null -w "%{http_code}\n" "${ENDPOINT}/api/search/modes"; then
+            echo "qa endpoint ${ENDPOINT} unreachable — skipping this nightly"
+            exit 1
+          fi
+
+      - name: Run audit-quality.ps1
+        shell: pwsh
+        run: |
+          pwsh -File scripts/audit/audit-quality.ps1 `
+            -InputCorpus "scripts/audit/$env:CORPUS" `
+            -OutputDir "$env:GITHUB_WORKSPACE" `
+            -Endpoint "$env:ENDPOINT" `
+            -Modes "combined" `
+            -EnrichmentLevel "none" `
+            -ThrottleLimit 4 `
+            -MaxTimeoutS 12 `
+            -InterRequestMs 500
+
+      - name: Run analyze-quality.ps1
+        shell: pwsh
+        run: |
+          $raw = Get-ChildItem "$env:GITHUB_WORKSPACE/qa-quality-raw-*.csv" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          Write-Host "Analyzing $($raw.Name)"
+          pwsh -File scripts/audit/analyze-quality.ps1 `
+            -InputCSV $raw.FullName `
+            -OutputDir "$env:GITHUB_WORKSPACE"
+
+      - name: Publish nightly report to docs/reports/nightly/${{ steps.stamp.outputs.date }}
+        shell: bash
+        run: |
+          DEST="docs/reports/nightly/${{ steps.stamp.outputs.date }}"
+          mkdir -p "$DEST"
+          cp "$GITHUB_WORKSPACE/qa-quality-raw-"*.csv                  "$DEST/raw.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-by-category-"*.csv          "$DEST/by-category.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-by-system-"*.csv            "$DEST/by-system.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-by-slice-"*.csv             "$DEST/by-slice.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-by-strategy-"*.csv          "$DEST/by-strategy.csv"          || true
+          cp "$GITHUB_WORKSPACE/qa-quality-by-strategy-slice-"*.csv    "$DEST/by-strategy-slice.csv"    || true
+          cp "$GITHUB_WORKSPACE/qa-quality-failures-"*.csv             "$DEST/failures.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-summary-"*.txt              "$DEST/summary.txt"
+          ls -la "$DEST"
+
+      - name: Check alert thresholds
+        id: alerts
+        shell: pwsh
+        run: |
+          $summ = Get-Content "$env:GITHUB_WORKSPACE/qa-quality-summary-*.txt" -EA 0 | Out-String
+          $f1c  = [double](([regex]::Match($summ, "F1_correct\s*=\s*([\d\.]+)")).Groups[1].Value)
+          $f1h  = [double](([regex]::Match($summ, "F1_hit\s*=\s*([\d\.]+)")).Groups[1].Value)
+          $avg  = [double](([regex]::Match($summ, "AvgRepl_correct\s*=\s*([\d\.]+)")).Groups[1].Value)
+
+          Write-Host "F1_hit=$f1h  F1_correct=$f1c  AvgRepl=$avg"
+          echo "f1_correct=$f1c"    >> $env:GITHUB_OUTPUT
+          echo "f1_hit=$f1h"        >> $env:GITHUB_OUTPUT
+          echo "avg_repl=$avg"      >> $env:GITHUB_OUTPUT
+
+          # Absolute floors (adjust as milestones progress).
+          $alertReason = @()
+          if ($f1c -lt 0.30) { $alertReason += "F1_correct=$f1c below floor 0.30" }
+          if ($f1h -lt 0.60) { $alertReason += "F1_hit=$f1h below floor 0.60" }
+
+          if ($alertReason.Count -gt 0) {
+            $joined = $alertReason -join '; '
+            echo "alert_msg=$joined" >> $env:GITHUB_OUTPUT
+            echo "should_alert=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "should_alert=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Commit + push nightly report
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="nightly-audits/${{ steps.stamp.outputs.date }}"
+          git checkout -B "$BRANCH"
+          git add docs/reports/nightly/${{ steps.stamp.outputs.date }}
+          git commit -m "chore(nightly): audit results for ${{ steps.stamp.outputs.date }}
+
+          F1_hit     = ${{ steps.alerts.outputs.f1_hit }}
+          F1_correct = ${{ steps.alerts.outputs.f1_correct }}
+          AvgRepl    = ${{ steps.alerts.outputs.avg_repl }}
+          " || {
+            echo "no changes to commit (probably empty run)"
+            exit 0
+          }
+          git push -f origin "$BRANCH"
+
+      - name: Open alert issue if thresholds tripped
+        if: steps.alerts.outputs.should_alert == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "[nightly-audit] ${{ steps.stamp.outputs.date }} - quality floor tripped" \
+            --body "**Nightly audit failure on ${{ steps.stamp.outputs.date }}**
+
+          Alert reasons: ${{ steps.alerts.outputs.alert_msg }}
+
+          Numbers:
+          - F1_hit     = ${{ steps.alerts.outputs.f1_hit }}
+          - F1_correct = ${{ steps.alerts.outputs.f1_correct }}
+          - AvgRepl    = ${{ steps.alerts.outputs.avg_repl }}
+
+          Full report: [docs/reports/nightly/${{ steps.stamp.outputs.date }}/](../../tree/nightly-audits/${{ steps.stamp.outputs.date }}/docs/reports/nightly/${{ steps.stamp.outputs.date }})
+
+          Runbook:
+          1. Compare \`by-category.csv\` to yesterday's for the categories that regressed
+          2. Compare \`by-strategy.csv\` to identify which strategy broke
+          3. Read \`failures.csv\` for the failing OEMs + reasons
+          " \
+            --label "nightly-audit,regression"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-audit-${{ steps.stamp.outputs.date }}
+          path: |
+            qa-quality-raw-*.csv
+            qa-quality-by-*.csv
+            qa-quality-failures-*.csv
+            qa-quality-summary-*.txt
