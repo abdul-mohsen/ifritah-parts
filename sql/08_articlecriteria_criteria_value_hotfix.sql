@@ -1,0 +1,67 @@
+-- ============================================================================
+-- MySQL migration 08 — articlecriteria criteria_value index HOTFIX
+-- ============================================================================
+-- sql/07_articlecriteria_indexes.sql declares TWO indexes on articlecriteria:
+--
+--   * idx_articlecriteria_legacyArticleId
+--   * idx_articlecriteria_criteria_value
+--
+-- The 2026-08-26 TecDoc-health diagnostic
+-- (scripts/diagnostics/tecdoc_health_report.sql section 2) revealed that
+-- on the current qa TecDoc MySQL, ONLY THE FIRST INDEX was applied:
+--
+--   check_name                              | status
+--   ----------------------------------------|-------------------------
+--   idx_articlecriteria_legacyArticleId     | PRESENT
+--   idx_articlecriteria_criteria_value      | MISSING (sql/07 needed)
+--
+-- Root cause is operational, not code — the sql/07 migration was applied
+-- partially (only the first CREATE INDEX statement completed; the second
+-- either timed out, was interrupted, or was never run). This hotfix
+-- migration is minimal: it re-applies ONLY the missing index, without
+-- re-running the DDL that already succeeded.
+--
+-- Impact of the missing index (from the 2026-08-22 audit):
+--
+--   FindBySpecMatch (strategy_spec_match.go:225-258)
+--     runs `WHERE criteriaDescription = ? AND rawValue = ?` against 27M
+--     rows without an index — hits the ctx deadline on every enrichment
+--     call. This is one of the reasons AvgOEMxRef sits at 0 in the audit.
+--
+-- Migration properties:
+--
+--   * Data-preserving — pure DDL, adds one index, no column mutations
+--   * MySQL 8.0+ ONLINE — non-blocking on the Aiven managed instance
+--   * Idempotent-to-failure — if somehow the index IS already there,
+--     MySQL rejects with ERROR 1061 (Duplicate key name); safe to ignore
+--   * Reversible
+--
+-- ROLLBACK:
+--
+--   ALTER TABLE articlecriteria DROP INDEX idx_articlecriteria_criteria_value;
+--
+-- Estimated DDL time: 5-10 min on 27M rows on Aiven-managed MySQL.
+-- Runs online — no application downtime.
+-- ============================================================================
+
+-- Compound index — criteriaDescription first because it has bounded
+-- cardinality (~few hundred distinct spec names); rawValue has high
+-- cardinality. Full selectivity for the AND-of-equalities pattern.
+CREATE INDEX idx_articlecriteria_criteria_value
+  ON articlecriteria (criteriaDescription, rawValue);
+
+-- ─ Verification queries (advisory, no side effects) ────────────────────
+-- Run AFTER the DDL completes to confirm the index is healthy and used.
+--
+-- -- Confirm the index exists:
+-- SHOW INDEX FROM articlecriteria
+--   WHERE Key_name = 'idx_articlecriteria_criteria_value';
+--
+-- -- Confirm the query planner uses it (expect: key='idx_articlecriteria_criteria_value', type='ref'):
+-- EXPLAIN
+--   SELECT DISTINCT a.legacyArticleId, a.articleNumber
+--   FROM articlecriteria ac
+--   JOIN articles a ON a.legacyArticleId = ac.legacyArticleId
+--   WHERE ac.criteriaDescription = 'Thread Size'
+--     AND ac.rawValue = 'M20 x 1.5'
+--   LIMIT 10;
