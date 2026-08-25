@@ -454,25 +454,34 @@ collectLoop:
 	// "Headlight Assembly" — headlight doesn't overlap with "mirrors"
 	// tokens so it gets dropped entirely).
 	//
-	// Opt-in only: nil expected-tokens means the OEM doesn't decode,
-	// so we can't validate — pass everything through.
+	// Opt-in only:
+	//   1. nil expected-tokens means the OEM doesn't decode; pass through.
+	//   2. Partial-OEM stems (e.g. "97133") have prefix ambiguity — the
+	//      3-digit "971" decodes to Compressor A/C, but real HK data for
+	//      that stem often contains Cabin Air Filter. Only apply the
+	//      drop when the queried OEM normalises to a FULL 5-5 form
+	//      (>= 10 normalised chars); the M1.S1 penalty still demotes
+	//      cross-family stem results.
 	if req.OEM != "" {
-		expected := CategoryTokensForOEM(req.OEM)
-		if len(expected) > 0 {
-			kept := results[:0]
-			dropped := 0
-			for _, r := range results {
-				if hasCategoryOverlap(r.Description, expected) {
-					kept = append(kept, r)
-					continue
+		normalizedOEM := NormalizeOEM(req.OEM)
+		if len(normalizedOEM) >= 10 {
+			expected := CategoryTokensForOEM(req.OEM)
+			if len(expected) > 0 {
+				kept := results[:0]
+				dropped := 0
+				for _, r := range results {
+					if hasCategoryOverlap(r.Description, expected) {
+						kept = append(kept, r)
+						continue
+					}
+					dropped++
 				}
-				dropped++
+				if dropped > 0 {
+					log.Printf("[Combined] category-mismatch DROPPED %d/%d results for oem=%q expected_tokens=%v",
+						dropped, len(results), req.OEM, expected)
+				}
+				results = kept
 			}
-			if dropped > 0 {
-				log.Printf("[Combined] category-mismatch DROPPED %d/%d results for oem=%q expected_tokens=%v",
-					dropped, len(results), req.OEM, expected)
-			}
-			results = kept
 		}
 	}
 
