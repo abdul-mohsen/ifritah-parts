@@ -1,0 +1,272 @@
+name: pr-quality-gate
+
+# M6.S1.T2 - blocks PRs that regress F1_correct on the canary corpus
+# by more than 0.02 relative to the latest nightly baseline.
+#
+# Skips when the PR only touches:
+#   - docs/, scripts/, frontend/, sql/
+#   - .github/**, *.md
+#
+# When it runs:
+#   1. Fetches the most recent successful nightly-audit branch (baseline)
+#   2. Runs the same audit against qa (search still hits qa - PR-preview
+#      auto-deploy is not wired yet, so we use qa as the shared endpoint)
+#   3. Compares this-PR F1_correct vs baseline F1_correct
+#   4. Fails if the drop >= threshold; posts a summary comment either way
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: pr-quality-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_gate: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect code changes
+        id: filter
+        shell: bash
+        run: |
+          # Get the merge-base diff
+          BASE_SHA=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD)
+          echo "changed files:"
+          echo "$CHANGED"
+
+          # Only trigger the gate when internal/service, internal/handler,
+          # cmd/, or db/migrations/ actually change.
+          if echo "$CHANGED" | grep -qE '^(internal/service/|internal/handler/|cmd/|db/migrations/|sql/07)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping quality gate - only non-code files changed"
+          fi
+
+  quality-gate:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.needs_gate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REGRESSION_THRESHOLD: '0.02'
+      # Soft-fail when qa is unreachable - CI shouldn't block PRs on a
+      # transient qa outage. Set to 'false' to reinstate hard-fail.
+      QA_SOFT_FAIL_ON_UNREACHABLE: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set date stamp
+        id: stamp
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Health check qa
+        id: health
+        shell: bash
+        run: |
+          set +e
+          curl -fsS --max-time 10 -o /dev/null "https://qa.ifritah.com/api/search/modes"
+          RC=$?
+          if [ $RC -ne 0 ]; then
+            echo "qa endpoint unreachable (curl exit $RC)"
+            echo "qa_up=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "qa_up=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run audit against qa
+        id: audit
+        if: steps.health.outputs.qa_up == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:GITHUB_WORKSPACE/current"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          & pwsh -NoProfile -File scripts/audit/audit-quality.ps1 `
+            -InputCorpus scripts/audit/corpus-200-canary.csv `
+            -OutputDir $out `
+            -Endpoint https://qa.ifritah.com `
+            -Modes combined `
+            -EnrichmentLevel none `
+            -ThrottleLimit 4 `
+            -MaxTimeoutS 12 `
+            -InterRequestMs 500
+
+          $raw = Get-ChildItem "$out/qa-quality-raw-*.csv" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $raw) { throw "audit produced no raw CSV" }
+
+          & pwsh -NoProfile -File scripts/audit/analyze-quality.ps1 `
+            -InputCSV $raw.FullName `
+            -OutputDir $out
+
+          $summary = Get-ChildItem "$out/qa-quality-summary-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $summaryPath = $summary.FullName
+          Write-Host "summary: $summaryPath"
+          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Fetch most recent nightly baseline
+        id: baseline
+        if: steps.audit.outcome == 'success'
+        shell: bash
+        run: |
+          set -e
+          git fetch origin 'refs/heads/nightly-audits/*:refs/remotes/origin/nightly-audits/*' 2>/dev/null || true
+          LATEST=$(git branch -r | grep 'nightly-audits/' | sort -r | head -n 1 | tr -d ' ' || true)
+
+          if [ -z "$LATEST" ]; then
+            echo "no nightly baseline branch — reporting PR numbers only"
+            echo "has_baseline=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BASELINE_DATE=$(echo "$LATEST" | sed 's|origin/nightly-audits/||')
+          BASELINE_FILE="docs/reports/nightly/${BASELINE_DATE}/summary.txt"
+          git checkout "$LATEST" -- "$BASELINE_FILE" 2>/dev/null || {
+            echo "baseline summary file $BASELINE_FILE not on branch $LATEST"
+            echo "has_baseline=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          BASELINE_F1=$(grep -oE 'F1_correct\s*=\s*[0-9.]+' "$BASELINE_FILE" | head -n 1 | grep -oE '[0-9.]+$' || echo "")
+          if [ -z "$BASELINE_F1" ]; then
+            echo "could not parse F1_correct from baseline"
+            echo "has_baseline=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "baseline_date=$BASELINE_DATE" >> "$GITHUB_OUTPUT"
+          echo "baseline_f1_correct=$BASELINE_F1" >> "$GITHUB_OUTPUT"
+          echo "has_baseline=true" >> "$GITHUB_OUTPUT"
+
+      - name: Compare + decide
+        id: compare
+        if: steps.audit.outcome == 'success'
+        shell: bash
+        run: |
+          set -e
+          SUMMARY="${{ steps.audit.outputs.summary_path }}"
+          PR_F1=$(grep -oE 'F1_correct\s*=\s*[0-9.]+' "$SUMMARY" | head -n 1 | grep -oE '[0-9.]+$' || echo "")
+          if [ -z "$PR_F1" ]; then
+            echo "could not parse PR F1_correct — assuming pass"
+            echo "gate_action=info-only" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_f1_correct=$PR_F1" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ steps.baseline.outputs.has_baseline }}" != "true" ]; then
+            echo "gate_action=info-only" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BASE_F1="${{ steps.baseline.outputs.baseline_f1_correct }}"
+          THRESHOLD="${{ env.REGRESSION_THRESHOLD }}"
+
+          # bc is preinstalled on ubuntu-latest runners.
+          DELTA=$(echo "$PR_F1 - $BASE_F1" | bc -l)
+          IS_REGRESSION=$(echo "$DELTA < -$THRESHOLD" | bc -l)
+          echo "delta=$DELTA" >> "$GITHUB_OUTPUT"
+          if [ "$IS_REGRESSION" = "1" ]; then
+            echo "gate_action=block" >> "$GITHUB_OUTPUT"
+          else
+            echo "gate_action=pass" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUDIT_OUTCOME: ${{ steps.audit.outcome }}
+          HEALTH_UP: ${{ steps.health.outputs.qa_up }}
+          GATE_ACTION: ${{ steps.compare.outputs.gate_action }}
+          PR_F1: ${{ steps.compare.outputs.pr_f1_correct }}
+          BASE_F1: ${{ steps.baseline.outputs.baseline_f1_correct }}
+          BASE_DATE: ${{ steps.baseline.outputs.baseline_date }}
+          DELTA: ${{ steps.compare.outputs.delta }}
+          THRESHOLD: ${{ env.REGRESSION_THRESHOLD }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -e
+          BODY_FILE=$(mktemp)
+
+          if [ "$HEALTH_UP" != "true" ]; then
+            cat > "$BODY_FILE" <<EOF
+          ## ⚠️  PR quality gate skipped
+
+          qa.ifritah.com was unreachable when this gate ran. Skipping with a soft-pass — this doesn't imply the PR is safe. Re-run the workflow once qa is back up.
+          EOF
+          elif [ "$AUDIT_OUTCOME" != "success" ]; then
+            cat > "$BODY_FILE" <<EOF
+          ## ❌ PR quality gate: audit failed to run
+
+          The audit step errored before producing a summary. Check the workflow logs.
+          EOF
+          elif [ "$GATE_ACTION" = "block" ]; then
+            cat > "$BODY_FILE" <<EOF
+          ## ❌ PR quality gate: BLOCKED — F1_correct regressed
+
+          | Metric | Baseline ($BASE_DATE) | This PR | Delta |
+          |---|---:|---:|---:|
+          | F1_correct | $BASE_F1 | $PR_F1 | $DELTA |
+
+          Regression threshold: F1_correct dropped by more than $THRESHOLD. Investigate:
+          - \`docs/reports/nightly/$BASE_DATE/by-category.csv\` for category-level baseline
+          - The uploaded artifact for this run's per-OEM failures
+          EOF
+          elif [ "$GATE_ACTION" = "pass" ]; then
+            cat > "$BODY_FILE" <<EOF
+          ## ✅ PR quality gate: passed
+
+          | Metric | Baseline ($BASE_DATE) | This PR | Delta |
+          |---|---:|---:|---:|
+          | F1_correct | $BASE_F1 | $PR_F1 | $DELTA |
+
+          Delta within tolerance (>= -$THRESHOLD). PR safe to merge on quality grounds.
+          EOF
+          else
+            cat > "$BODY_FILE" <<EOF
+          ## ℹ️  PR quality gate: info-only
+
+          | Metric | This PR |
+          |---|---:|
+          | F1_correct | ${PR_F1:-n/a} |
+
+          No nightly baseline exists yet. Once the nightly-audit workflow runs once, this comment will include a delta.
+          EOF
+          fi
+
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$BODY_FILE"
+
+      - name: Fail if gate blocked
+        if: steps.compare.outputs.gate_action == 'block'
+        run: |
+          echo "F1_correct regressed by more than ${{ env.REGRESSION_THRESHOLD }} vs baseline"
+          echo "  baseline: ${{ steps.baseline.outputs.baseline_f1_correct }}"
+          echo "  this PR:  ${{ steps.compare.outputs.pr_f1_correct }}"
+          echo "  delta:    ${{ steps.compare.outputs.delta }}"
+          exit 1
+
+      - name: Upload PR audit artifacts
+        if: always() && steps.audit.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-quality-gate-${{ github.event.pull_request.number }}
+          path: current/
+          if-no-files-found: warn

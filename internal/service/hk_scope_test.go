@@ -136,3 +136,90 @@ func TestIsJunkDescription(t *testing.T) {
 		}
 	}
 }
+
+// TestIsHKOEM_ExpandedDenyList — regression test for M1.S2.T1. Verifies
+// the ≥ 100 new entries added in the widened deny-list correctly reject
+// non-HK OEMs and suggest the right make.
+func TestIsHKOEM_ExpandedDenyList(t *testing.T) {
+	cases := []struct {
+		oem  string
+		make string
+	}{
+		// Toyota
+		{"90080-91130", "Toyota"},
+		{"90118-06120", "Toyota"},
+		{"88310-08010", "Toyota"},
+		{"87139-30040", "Toyota"},
+		// BMW
+		{"34116768458", "BMW"},
+		{"34216799168", "BMW"},
+		{"13718511668", "BMW"},
+		{"64119237555", "BMW"},
+		// Nissan
+		{"16546-JG30A", "Nissan"},
+		{"27891-JG40A", "Nissan"},
+		{"41060-EM10A", "Nissan"},
+		// Honda
+		{"80292-TR0-A01", "Honda"},
+		{"45022-STK-A00", "Honda"},
+		// Peugeot
+		{"9803155780", "Peugeot"},
+		{"9804010580", "Peugeot"},
+		{"1109-Y2", "Peugeot"},
+		// Renault
+		{"7700111321", "Renault"},
+		{"8200867979", "Renault"},
+		// Chrysler / Fiat
+		{"68035931AA", "Chrysler"},
+		{"68051346AA", "Chrysler"},
+		{"6810040AA", "Chrysler"},
+		// Mitsubishi
+		{"MD189804", "Mitsubishi"},
+		{"MR597472", "Mitsubishi"},
+		{"MB393605", "Mitsubishi"},
+		// Volkswagen
+		{"06A115561B", "Volkswagen"},
+		{"03C115561H", "Volkswagen"},
+		// Volvo
+		{"31261191", "Volvo"},
+		// Mercedes
+		{"A0001803009", "Mercedes-Benz"},
+		{"A2780180009", "Mercedes-Benz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.oem, func(t *testing.T) {
+			got := IsHKOEM(tc.oem)
+			if got.IsHK {
+				t.Errorf("IsHKOEM(%q) = IsHK=true (want false); result=%+v", tc.oem, got)
+			}
+			if got.SuggestedMake != tc.make {
+				t.Errorf("IsHKOEM(%q).SuggestedMake = %q, want %q", tc.oem, got.SuggestedMake, tc.make)
+			}
+		})
+	}
+}
+
+// TestIsHKOEM_DenyListDoesNotOvertriggerOnHKOEMs — regression guard. The
+// widened deny-list must NOT reject genuine HK OEMs. Verifies known HK
+// OEMs still pass the guard as IsHK=true.
+func TestIsHKOEM_DenyListDoesNotOvertriggerOnHKOEMs(t *testing.T) {
+	// Every real HK OEM from the audit-corpus seeded slice — must remain IsHK=true
+	golden := []string{
+		"26350-2J001", "26300-35505", "58101-3XA00", "97133-D3000",
+		"28113-2S000", "97133-2H001", "82460-2T010", "58101-3SA00",
+		"55311-2H000", "54630-2H000", "27301-2E400", "58411-2SA00",
+		"51712-2WA00", "82460-D3000", "82460-3S000", "26350-3C100",
+		"46321-3B650", "54528-4A100", "92101-3S050",
+	}
+	for _, oem := range golden {
+		t.Run(oem, func(t *testing.T) {
+			got := IsHKOEM(oem)
+			if !got.IsHK {
+				t.Errorf("IsHKOEM(%q) = IsHK=false (want true); result=%+v — deny-list overtriggering!", oem, got)
+			}
+			if got.SuggestedMake != "" {
+				t.Errorf("IsHKOEM(%q).SuggestedMake = %q, want empty for a genuine HK OEM", oem, got.SuggestedMake)
+			}
+		})
+	}
+}

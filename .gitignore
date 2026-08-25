@@ -38,6 +38,10 @@ coverage_out.txt
 still_not_found.txt
 not_found_*.txt
 qa_*.txt
+
+# Exception: audit-report data + baseline corpora are meant to be committed.
+!docs/reports/**/*.csv
+!scripts/audit/*.csv
 estimate_output.txt
 
 # Runtime logs from scripts/dev-server.ps1

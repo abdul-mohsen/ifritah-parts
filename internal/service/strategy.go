@@ -420,13 +420,119 @@ collectLoop:
 			results = append(results, r)
 		}
 	}
+
+	// M1.S2.T2: confidence floor for solo-cache low-conf hits. A single
+	// cache-only hit with confidence < 0.5 and no corroboration from any
+	// other strategy is almost always stale garbage (an old row for an
+	// unrelated part that shares a prefix). Drop it - keeps combined
+	// results tight when the cache is dirty. Multi-strategy hits pass
+	// through regardless of confidence (the corroboration itself is
+	// evidence of correctness).
+	if len(results) > 0 {
+		filtered := results[:0]
+		dropped := 0
+		for _, r := range results {
+			primary := firstStrategyOf(r.SourceStrategy)
+			isSoloCache := primary == "cache" && !strings.Contains(r.SourceStrategy, ",")
+			if isSoloCache && r.Confidence < 0.5 {
+				dropped++
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		if dropped > 0 {
+			log.Printf("[Combined] dropped %d solo-cache low-conf hit(s) for oem=%q", dropped, req.OEM)
+		}
+		results = filtered
+	}
+
+	// M1.S3.T2: category-consistency validation. When the queried OEM
+	// decodes to a known part-family, drop any result whose description
+	// doesn't contain a single token from the expected category label.
+	// This catches wrong-category hallucinations that the M1.S1 penalty
+	// only demotes but doesn't remove (mirror OEM 86391-* returning
+	// "Headlight Assembly" — headlight doesn't overlap with "mirrors"
+	// tokens so it gets dropped entirely).
+	//
+	// Opt-in only:
+	//   1. nil expected-tokens means the OEM doesn't decode; pass through.
+	//   2. Partial-OEM stems (e.g. "97133") have prefix ambiguity — the
+	//      3-digit "971" decodes to Compressor A/C, but real HK data for
+	//      that stem often contains Cabin Air Filter. Only apply the
+	//      drop when the queried OEM normalises to a FULL 5-5 form
+	//      (>= 10 normalised chars); the M1.S1 penalty still demotes
+	//      cross-family stem results.
+	if req.OEM != "" {
+		normalizedOEM := NormalizeOEM(req.OEM)
+		if len(normalizedOEM) >= 10 {
+			expected := CategoryTokensForOEM(req.OEM)
+			if len(expected) > 0 {
+				kept := results[:0]
+				dropped := 0
+				for _, r := range results {
+					if hasCategoryOverlap(r.Description, expected) {
+						kept = append(kept, r)
+						continue
+					}
+					dropped++
+				}
+				if dropped > 0 {
+					log.Printf("[Combined] category-mismatch DROPPED %d/%d results for oem=%q expected_tokens=%v",
+						dropped, len(results), req.OEM, expected)
+				}
+				results = kept
+			}
+		}
+	}
+
+	// M1.S1.T2: cross-family confidence penalty. When a result surfaced by a
+	// fallback strategy (cache / legacy / prefix_inference) has a category
+	// whose parent system does NOT match the queried OEM prefix's expected
+	// system, multiply its confidence by 0.2 so a same-system alternative -
+	// if any - sorts above it. The result is preserved (not dropped) for
+	// observability. See docs/reports/2026-08-23-quality-audit/README.md
+	// for the 45 wrong-category categories that motivated this.
+	if req.OEM != "" {
+		penalised := 0
+		for i := range results {
+			primary := firstStrategyOf(results[i].SourceStrategy)
+			isFallback := primary == "cache" || primary == "legacy" || primary == "prefix_inference"
+			if !isFallback {
+				continue
+			}
+			penalty := strategyCategoryPenalty(req.OEM, results[i].Category)
+			if penalty < 1.0 {
+				results[i].Confidence *= penalty
+				penalised++
+			}
+		}
+		if penalised > 0 {
+			log.Printf("[Combined] category-penalty applied oem=%q penalised=%d/%d results", req.OEM, penalised, len(results))
+		}
+	}
+
 	sort.Slice(results, func(i, j int) bool {
 		// Parse the first strategy from comma-joined SourceStrategy to get its priority
 		pi := strategyPriority(results[i].SourceStrategy, priorities)
 		pj := strategyPriority(results[j].SourceStrategy, priorities)
 		si := results[i].Confidence * pi
 		sj := results[j].Confidence * pj
-		return si > sj
+		if si != sj {
+			return si > sj
+		}
+		// M1.S1.T3: same-system tiebreak. When scores match, prefer the
+		// result whose category-system matches the queried OEM prefix.
+		if req.OEM != "" {
+			queried := DecodeOEMPrefix(req.OEM)
+			if queried != nil {
+				iMatch := categoryToSystem(results[i].Category) == queried.System
+				jMatch := categoryToSystem(results[j].Category) == queried.System
+				if iMatch != jMatch {
+					return iMatch
+				}
+			}
+		}
+		return false
 	})
 	if len(results) > limit {
 		results = results[:limit]
@@ -482,6 +588,70 @@ func strategyPriority(source string, priorities map[string]float64) float64 {
 		return p
 	}
 	return 0.5
+}
+
+// firstStrategyOf extracts the primary strategy name from a comma-joined
+// SourceStrategy string. Returns the input verbatim when no comma present.
+// Kept package-scoped so both the ranker penalty and the confidence-floor
+// filter share the same tokenisation rule.
+func firstStrategyOf(source string) string {
+	if idx := strings.Index(source, ","); idx >= 0 {
+		return source[:idx]
+	}
+	return source
+}
+
+// categorySystemMap is a reverse index of prefixMap: given a category
+// name it returns the system that category belongs to. Built once at
+// init time so the cross-family penalty is O(1) per result.
+var categorySystemMap = func() map[string]string {
+	m := make(map[string]string, len(prefixMap))
+	for _, cat := range prefixMap {
+		if cat.Category != "" {
+			m[cat.Category] = cat.System
+		}
+	}
+	return m
+}()
+
+// categoryToSystem returns the system name associated with a category
+// label, empty when unknown. See categorySystemMap for the source.
+func categoryToSystem(category string) string {
+	return categorySystemMap[category]
+}
+
+// strategyCategoryPenalty returns a confidence multiplier applied when a
+// search result's category-system does NOT match the queried OEM prefix's
+// expected system. Introduced in M1.S1 (2026-08-24 quality audit — see
+// docs/reports/2026-08-23-quality-audit/README.md §"Categories that fail"
+// for the 45 categories where combined mode returned wrong-family parts).
+//
+// The penalty preserves the hit (won't be dropped by a hard filter) but
+// sinks its rank via confidence multiplication so a same-system
+// alternative — if any exists — sorts above it.
+//
+// Returns 1.0 (no penalty) when:
+//   - the queried OEM does not decode (partial stem, non-HK, empty)
+//   - the result has no category, or the category is unknown to
+//     categorySystemMap
+//   - the result's category-system matches the queried OEM's system
+//
+// Returns 0.2 for cross-family mismatches (e.g. mirror OEM 86xxx-* returning
+// a Headlight-Assembly result). Same-family matches at 1.0 always outrank
+// cross-family matches at 0.2 unless the base confidence gap is > 5x.
+func strategyCategoryPenalty(queryOEM string, resultCategory string) float64 {
+	if queryOEM == "" || resultCategory == "" {
+		return 1.0
+	}
+	queried := DecodeOEMPrefix(queryOEM)
+	if queried == nil || queried.System == "" {
+		return 1.0
+	}
+	resultSystem := categoryToSystem(resultCategory)
+	if resultSystem == "" || resultSystem == queried.System {
+		return 1.0
+	}
+	return 0.2
 }
 
 // ─── Circuit breaker (S4-T5) ─────────────────────────────────────────────────

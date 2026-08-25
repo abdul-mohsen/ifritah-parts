@@ -1,0 +1,116 @@
+name: rockauto-refresh
+
+# M4.S1.T3 — weekly RockAuto scrape + import for the top-500 most-queried
+# OEMs. Runs on a schedule; can also be triggered manually via
+# workflow_dispatch when a scraper adaptation just landed.
+#
+# The scraper (M4.S1.T1) is currently a skeleton returning dry-run rows.
+# When the chromedp integration ships, remove `--dry-run` from the
+# 'Run scraper' step below.
+
+on:
+  schedule:
+    # 04:00 UTC every Sunday
+    - cron: '0 4 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip real scraper calls; emit synthetic rows'
+        type: boolean
+        default: true
+      vehicles_csv:
+        description: 'Path to CSV of vehicles to walk (relative to repo)'
+        required: false
+        default: ''
+
+concurrency:
+  group: rockauto-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: parts
+          POSTGRES_PASSWORD: parts_engine_pw
+          POSTGRES_DB: parts_engine
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U parts -d parts_engine"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 55432
+      PGUSER: parts
+      PGPASSWORD: parts_engine_pw
+      PGDATABASE: parts_engine
+      PGSSLMODE: disable
+      DRY_RUN: ${{ inputs.dry_run || 'true' }}
+      VEHICLES_CSV: ${{ inputs.vehicles_csv }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Postgres client + pgvector
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client postgresql-17-pgvector
+
+      - name: Apply Postgres migrations
+        shell: bash
+        run: |
+          for file in db/migrations/*.sql; do
+            psql "postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$PGDATABASE?sslmode=$PGSSLMODE" -f "$file"
+          done
+
+      - name: Build scraper + importer
+        run: |
+          go build -o rockauto_scraper ./cmd/rockauto_scraper
+          go build -o rockauto_import  ./cmd/rockauto_import
+
+      - name: Run scraper (dry-run by default until chromedp integration lands)
+        shell: bash
+        run: |
+          FLAG=""
+          if [ "$DRY_RUN" = "true" ]; then FLAG="--dry-run"; fi
+          if [ -n "$VEHICLES_CSV" ] && [ -f "$VEHICLES_CSV" ]; then
+            ./rockauto_scraper $FLAG --vehicles "$VEHICLES_CSV" > rockauto-scrape.ndjson
+          else
+            ./rockauto_scraper $FLAG > rockauto-scrape.ndjson
+          fi
+          wc -l rockauto-scrape.ndjson
+
+      - name: Import into aftermarket_rockauto
+        shell: bash
+        run: |
+          cat rockauto-scrape.ndjson | ./rockauto_import
+
+      - name: Report row counts + freshness
+        shell: bash
+        run: |
+          psql "postgres://$PGUSER:$PGPASSWORD@$PGHOST:$PGPORT/$PGDATABASE?sslmode=$PGSSLMODE" \
+            -c "SELECT COUNT(*) AS total_rows, MAX(scraped_at) AS newest_scrape, MIN(scraped_at) AS oldest_scrape FROM aftermarket_rockauto;"
+
+      - name: Upload NDJSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rockauto-scrape-${{ github.run_id }}
+          path: rockauto-scrape.ndjson
+          retention-days: 30

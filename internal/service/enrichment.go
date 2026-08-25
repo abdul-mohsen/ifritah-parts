@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
+
+	"parts-engine/internal/model"
 )
 
 // enrichmentBudget is the outer wall-clock deadline for the entire
@@ -134,19 +137,59 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			oem := enriched.Part.ArticleNumber
 
 			if articleId == 0 && oem != "" && s.tecdoc != nil && budgetLeft() {
-				// Promote OEM string → TecDoc articleId(s). This also
-				// populates OEMNumbers so callers can see the raw cross-refs.
+				// Primary: oem_number table (sparse HK coverage — ~5% of real HK
+				// OEMs per the 2026-08-23 quality audit).
 				refs, err := s.tecdoc.SearchByOEM(oem, 5)
 				if err == nil && len(refs) > 0 {
-					// Pick the first ref with a non-zero articleId.
 					for _, ref := range refs {
 						if ref.LegacyArticleId > 0 {
 							articleId = ref.LegacyArticleId
 							break
 						}
 					}
-					// Attach the resolved OEMNumbers for downstream UI use.
 					enriched.OEMNumbers = append(enriched.OEMNumbers, refs...)
+				}
+
+				// Fallback: articlecrosses via SearchCrossReferences. The
+				// 2026-08-23 quality audit found 0% CompatibleVehicles + 2.5%
+				// Specs coverage because SearchByOEM returned 0 refs 74% of
+				// the time, leaving articleId=0 and skipping all
+				// article-anchored enrichment. articlecrosses (30M rows,
+				// indexed by sql/06) has broader HK OEM coverage than
+				// oem_number (21.5M rows); when the primary path fails, try
+				// the cross-ref path before giving up on article-anchored
+				// enrichment.
+				if articleId == 0 && s.tecDocCrossRef != nil && budgetLeft() {
+					crossRefs, cerr := s.tecDocCrossRef.SearchCrossReferences(oem, 5)
+					if cerr == nil && len(crossRefs) > 0 {
+						for _, ref := range crossRefs {
+							if ref.LegacyArticleId > 0 {
+								articleId = ref.LegacyArticleId
+								break
+							}
+						}
+						enriched.OEMNumbers = append(enriched.OEMNumbers, crossRefs...)
+					}
+				}
+
+				// M3.S1.T1: third-level fallback via oem_search_index.
+				// When both the primary oem_number lookup AND the
+				// articlecrosses fallback return 0 refs, try the
+				// secondary index table PR #14 introduced. Some OEMs
+				// only appear here (fuzzy-match cross-refs cataloged
+				// against slightly different OEM strings). Reads via
+				// TecDoc.SearchByOEM's secondary path shape.
+				if articleId == 0 && s.tecdoc != nil && budgetLeft() {
+					idxRefs, ierr := s.tecdoc.SearchByOEMIndex(oem, 5)
+					if ierr == nil && len(idxRefs) > 0 {
+						for _, ref := range idxRefs {
+							if ref.LegacyArticleId > 0 {
+								articleId = ref.LegacyArticleId
+								break
+							}
+						}
+						enriched.OEMNumbers = append(enriched.OEMNumbers, idxRefs...)
+					}
 				}
 			}
 
@@ -157,10 +200,10 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if amParts, err := s.tecdoc.FindAftermarketForOEM(oem); err == nil {
 					existing := make(map[string]bool, len(enriched.AftermarketAlternatives))
 					for _, p := range enriched.AftermarketAlternatives {
-						existing[p.Brand+"|"+p.PartNumber] = true
+						existing[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
 					}
 					for _, p := range amParts {
-						key := p.Brand + "|" + p.PartNumber
+						key := NormalizeBrand(p.Brand) + "|" + strings.ToLower(p.PartNumber)
 						if !existing[key] {
 							enriched.AftermarketAlternatives = append(enriched.AftermarketAlternatives, p)
 							existing[key] = true
@@ -177,7 +220,12 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			}
 
 			// Always: specifications
-			if s.tecDocSpecs != nil && budgetLeft() {
+			// M3.S1.T2: skip specs in the per-result goroutine — we
+			// batch-fetch them after collect. Legacy per-result call
+			// left in place for callers that don't have tecDocSpecs
+			// wired but the batch path can still succeed.
+			_ = articleId // suppress unused warning if we remove the block
+			if false && s.tecDocSpecs != nil && budgetLeft() {
 				if specs, err := s.tecDocSpecs.FindSpecifications(articleId); err == nil {
 					enriched.Specifications = specs
 				} else {
@@ -209,10 +257,88 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				}
 			}
 
-			// Full only: supersession chain (superseded / successor OEMs)
+			// Full only: supersession chain (superseded / successor OEMs).
+			// M2.S3.T2: every link in the chain also becomes an
+			// OEMReference in the result's OEMNumbers list so parts
+			// sellers can order any variant. Tagged Manufacturer =
+			// "SUPERSESSION" so downstream deduping doesn't confuse
+			// them with primary cross-refs.
+			//
+			// M2.S1.T2: also fetch aftermarket for every OEM in the
+			// chain. Widens the aftermarket net by including brands
+			// cataloged against the parent/child OEM (a Bosch filter
+			// listed as fitting the SUPERSEDED OEM should surface for
+			// the current OEM too).
 			if s.tecDocSuper != nil && budgetLeft() {
 				if chain, err := s.tecDocSuper.FindSupersession(articleId); err == nil {
 					enriched.Supersession = &chain
+					existing := make(map[string]bool, len(enriched.OEMNumbers))
+					for _, r := range enriched.OEMNumbers {
+						existing[strings.ToUpper(r.ArticleNumber)] = true
+					}
+					chainOEMs := make([]string, 0, len(chain.ReplacedBy)+len(chain.Replaces))
+					for _, link := range chain.ReplacedBy {
+						an := strings.ToUpper(link.ArticleNumber)
+						if an == "" || existing[an] {
+							continue
+						}
+						existing[an] = true
+						enriched.OEMNumbers = append(enriched.OEMNumbers, model.OEMReference{
+							RawNumber:       link.ArticleNumber,
+							ArticleNumber:   link.ArticleNumber,
+							Description:     link.Description,
+							BrandName:       link.BrandName,
+							LegacyArticleId: link.LegacyArticleId,
+							Manufacturer:    "SUPERSESSION",
+						})
+						chainOEMs = append(chainOEMs, link.ArticleNumber)
+					}
+					for _, link := range chain.Replaces {
+						an := strings.ToUpper(link.ArticleNumber)
+						if an == "" || existing[an] {
+							continue
+						}
+						existing[an] = true
+						enriched.OEMNumbers = append(enriched.OEMNumbers, model.OEMReference{
+							RawNumber:       link.ArticleNumber,
+							ArticleNumber:   link.ArticleNumber,
+							Description:     link.Description,
+							BrandName:       link.BrandName,
+							LegacyArticleId: link.LegacyArticleId,
+							Manufacturer:    "SUPERSESSION",
+						})
+						chainOEMs = append(chainOEMs, link.ArticleNumber)
+					}
+
+					// M2.S1.T2: fetch aftermarket for each chain OEM
+					// and union into AftermarketAlternatives. Bounded
+					// to 5 chain OEMs so we don't fan out unbounded.
+					if len(chainOEMs) > 5 {
+						chainOEMs = chainOEMs[:5]
+					}
+					if s.tecdoc != nil && len(chainOEMs) > 0 && budgetLeft() {
+						amExisting := make(map[string]bool, len(enriched.AftermarketAlternatives))
+						for _, p := range enriched.AftermarketAlternatives {
+							amExisting[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
+						}
+						for _, chainOEM := range chainOEMs {
+							if !budgetLeft() {
+								break
+							}
+							amParts, aerr := s.tecdoc.FindAftermarketForOEM(chainOEM)
+							if aerr != nil {
+								continue
+							}
+							for _, p := range amParts {
+								key := NormalizeBrand(p.Brand) + "|" + strings.ToLower(p.PartNumber)
+								if amExisting[key] {
+									continue
+								}
+								amExisting[key] = true
+								enriched.AftermarketAlternatives = append(enriched.AftermarketAlternatives, p)
+							}
+						}
+					}
 				}
 			}
 
@@ -250,6 +376,39 @@ collectLoop:
 		case <-ctx.Done():
 			log.Printf("[enrichResults] ctx deadline exceeded after %d/%d results — returning partial (some goroutines may still be running)", i, len(results))
 			break collectLoop
+		}
+	}
+
+	// M3.S1.T2: post-collect batch enrichment for specifications. Cheaper
+	// than per-result FindSpecifications when the response has many hits
+	// AND requires sql/07_articlecriteria_indexes.sql applied on qa
+	// (otherwise the IN-list query is N full scans of articlecriteria).
+	//
+	// Only runs when tecDocSpecs is wired, the request asks for enrichment
+	// beyond 'basic', and ctx still has budget.
+	if s.tecDocSpecs != nil && ctx.Err() == nil {
+		articleIds := make([]int, 0, len(out))
+		idToIdx := make(map[int][]int, len(out))
+		for i, r := range out {
+			id := r.LegacyArticleId
+			if id > 0 {
+				articleIds = append(articleIds, id)
+				idToIdx[id] = append(idToIdx[id], i)
+			}
+		}
+		if len(articleIds) > 0 {
+			specsById, err := s.tecDocSpecs.FindSpecificationsBatch(articleIds)
+			if err != nil {
+				log.Printf("[enrichResults] batch specs err=%v (falling back to skip specs)", err)
+			} else {
+				for id, specs := range specsById {
+					for _, idx := range idToIdx[id] {
+						if len(out[idx].Specifications) == 0 {
+							out[idx].Specifications = specs
+						}
+					}
+				}
+			}
 		}
 	}
 
