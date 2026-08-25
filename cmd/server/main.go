@@ -136,6 +136,14 @@ func main() {
 	supersession := service.NewSupersession(pg)
 	relatedParts := service.NewRelatedParts(pg)
 	feedback := service.NewFeedbackService(pg)
+	communityContrib := service.NewCommunityContribService(pg)
+
+	// Semantic search (optional) — only wire when EMBEDDER_SOCKET is set.
+	// When empty the /api/search/semantic endpoint returns 503 gracefully.
+	var semanticSvc *service.SemanticSearch
+	if sock := os.Getenv("EMBEDDER_SOCKET"); sock != "" {
+		semanticSvc = service.NewSemanticSearch(pg, service.NewUnixSocketEmbedder(sock))
+	}
 	platform := service.NewPlatform(pg)
 	recalls := service.NewRecallsClient(cfg.NHTSARecallsURL)
 	crossRef := service.NewCrossRef(pg, false)
@@ -236,6 +244,11 @@ func main() {
 	relatedPartsH := handler.NewRelatedPartsHandler(relatedParts)
 	vinPartsH := handler.NewVINPartsHandler(vinDecoder, tecdoc)
 	feedbackH := handler.NewFeedbackHandler(feedback)
+	contribH := handler.NewCommunityContribHandler(communityContrib)
+	if adminTok := os.Getenv("ADMIN_AUTH_TOKEN"); adminTok != "" {
+		contribH.SetAdminAuthToken(adminTok)
+	}
+	semanticH := handler.NewSemanticSearchHandler(semanticSvc)
 	recallsH := handler.NewRecallsHandler(recalls)
 	searchH := handler.NewSearchHandler(smartSearch)
 	catalogH := handler.NewCatalogHandler(partsLookup, crossRef)
@@ -300,6 +313,10 @@ func main() {
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/parts/related", relatedPartsH.Get)
 		api.POST("/search/feedback", feedbackH.Submit)
+		api.POST("/aftermarket/contribute", contribH.Submit)
+		api.GET("/admin/moderation/pending", contribH.ListPending)
+		api.POST("/admin/moderation/:id/review", contribH.Review)
+		api.GET("/search/semantic", semanticH.Get)
 		api.GET("/recalls", recallsH.ByVIN)
 		// Rate-limited: 100 requests/min sustained, burst 20 per client IP.
 		// Applied only to /api/search (not /search/modes which is cheap).

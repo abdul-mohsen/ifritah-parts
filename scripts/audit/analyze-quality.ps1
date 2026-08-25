@@ -216,19 +216,31 @@ $catRows = $classified | Group-Object ExpectedCategory | ForEach-Object {
   $g = $_.Group
   $existsCount = ($g | Where-Object { $_.GroundTruth -eq "exists" }).Count
   $m = Compute-Metrics $g
+  # M1.S3.T3 diagnostic: percentage of hits that carried a
+  # category-mismatch or category-penalty warning in the response.
+  # Empty when the deploy hasn't landed the M1.S1/M1.S3 guards yet;
+  # scales up as more categories fire the penalty.
+  $hitCount = ($g | Where-Object { $_.HasHit }).Count
+  $penHits = ($g | Where-Object {
+    $_.HasHit -and ($_.PSObject.Properties.Match('Warnings').Count -gt 0) -and
+    ($_.Warnings -match 'category-(penalty|mismatch)')
+  }).Count
+  $penPct = if ($hitCount -gt 0) { [Math]::Round(100.0 * $penHits / $hitCount, 1) } else { 0 }
+
   [PSCustomObject]@{
-    ExpectedCategory  = if ($_.Name) { $_.Name } else { "<blank>" }
-    N                 = $g.Count
-    N_exists          = $existsCount
-    F1_hit            = $m.Hit.F1
-    F1_correct        = $m.Correct.F1
-    AvgRepl_correct   = $m.AvgRepl
-    AvgAM_correct     = $m.AvgAM
-    AvgOEMxRef_correct= $m.AvgOEMx
-    F1_rich3          = $m.Rich3.F1
-    F1_rich5          = $m.Rich5.F1
-    F1_rich10         = $m.Rich10.F1
-    correct_TP        = $m.CorrectTP
+    ExpectedCategory        = if ($_.Name) { $_.Name } else { "<blank>" }
+    N                       = $g.Count
+    N_exists                = $existsCount
+    F1_hit                  = $m.Hit.F1
+    F1_correct              = $m.Correct.F1
+    AvgRepl_correct         = $m.AvgRepl
+    AvgAM_correct           = $m.AvgAM
+    AvgOEMxRef_correct      = $m.AvgOEMx
+    F1_rich3                = $m.Rich3.F1
+    F1_rich5                = $m.Rich5.F1
+    F1_rich10               = $m.Rich10.F1
+    correct_TP              = $m.CorrectTP
+    wrong_cat_penalized_pct = $penPct
   }
 } | Sort-Object N -Descending
 $catRows | Export-Csv $catFile -Encoding utf8 -NoTypeInformation
