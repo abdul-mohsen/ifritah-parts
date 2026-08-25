@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/joho/godotenv"
 
 	"parts-engine/db/migrations"
@@ -134,6 +134,7 @@ func main() {
 	partsLookup := service.NewPartsLookup(pg, false)
 	oemLookup := service.NewOEMLookup(pg)
 	supersession := service.NewSupersession(pg)
+	relatedParts := service.NewRelatedParts(pg)
 	platform := service.NewPlatform(pg)
 	recalls := service.NewRecallsClient(cfg.NHTSARecallsURL)
 	crossRef := service.NewCrossRef(pg, false)
@@ -231,6 +232,7 @@ func main() {
 	oemH.SetCrossRef(crossRef)
 	oemH.SetPartsLookup(partsLookup)
 	superH := handler.NewSupersessionHandler(supersession)
+	relatedPartsH := handler.NewRelatedPartsHandler(relatedParts)
 	recallsH := handler.NewRecallsHandler(recalls)
 	searchH := handler.NewSearchHandler(smartSearch)
 	catalogH := handler.NewCatalogHandler(partsLookup, crossRef)
@@ -292,6 +294,7 @@ func main() {
 		api.GET("/part/:id/vehicles", partsH.ReverseByArticle)
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
+		api.GET("/parts/related", relatedPartsH.Get)
 		api.GET("/recalls", recallsH.ByVIN)
 		// Rate-limited: 100 requests/min sustained, burst 20 per client IP.
 		// Applied only to /api/search (not /search/modes which is cheap).
