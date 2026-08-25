@@ -6,34 +6,61 @@
 -- sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 model.
 --
 -- Runtime: 27M articles at ~50 embeds/sec = ~150 hours end-to-end.
--- Batch job (cmd/embed_articles) is idempotent — safe to re-run,
+-- Batch job (cmd/embed_articles) is idempotent - safe to re-run,
 -- skips articles that already have embeddings.
 --
--- Index: IVFFlat with 1000 lists. Tuned for HK-scale corpus; adjust
--- when article count doubles.
+-- Soft-dependency on pgvector: when the extension isn't available on
+-- the target Postgres (vanilla postgres:17 in CI, some managed hosts),
+-- the whole migration NO-OPS with a NOTICE rather than failing. The
+-- runtime's SemanticSearch service returns 503 when article_embeddings
+-- doesn't exist, so semantic-search degrades gracefully to disabled
+-- instead of blocking server boot.
+--
+-- Production deployments should install pgvector separately (e.g. via
+-- the pgvector/pgvector:pg17 image or `apt install postgresql-17-pgvector`)
+-- to enable the feature; the app doesn't require it.
 -- ============================================================================
 
-CREATE EXTENSION IF NOT EXISTS vector;
+DO $$
+BEGIN
+	-- Attempt to enable pgvector. Every downstream DDL is guarded by the
+	-- outer EXCEPTION block, so a missing extension turns this whole
+	-- migration into a no-op with a NOTICE.
+	CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS article_embeddings (
-	legacy_article_id  INTEGER PRIMARY KEY,
-	description        TEXT NOT NULL,
-	embedding          vector(384),
-	model              TEXT NOT NULL,
-	created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+	-- Table
+	EXECUTE $ddl$
+		CREATE TABLE IF NOT EXISTS article_embeddings (
+			legacy_article_id  INTEGER PRIMARY KEY,
+			description        TEXT NOT NULL,
+			embedding          vector(384),
+			model              TEXT NOT NULL,
+			created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	$ddl$;
 
--- IVFFlat index for cosine-similarity search. Lists=1000 tuned for
--- ~27M rows; sqrt(N) heuristic says 5000 but IVFFlat quality/speed
--- tradeoff prefers fewer larger lists at this scale.
---
--- pgvector's `<->` operator is L2 distance; `<=>` is cosine distance.
--- We index for cosine because semantic similarity queries are
--- direction-based, not magnitude-based.
-CREATE INDEX IF NOT EXISTS idx_article_embeddings_cosine
-	ON article_embeddings USING ivfflat (embedding vector_cosine_ops)
-	WITH (lists = 1000);
+	-- IVFFlat cosine-similarity index; lists=1000 tuned for ~27M rows.
+	EXECUTE $ddl$
+		CREATE INDEX IF NOT EXISTS idx_article_embeddings_cosine
+			ON article_embeddings USING ivfflat (embedding vector_cosine_ops)
+			WITH (lists = 1000)
+	$ddl$;
 
-CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
-	ON article_embeddings (model);
+	EXECUTE $ddl$
+		CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
+			ON article_embeddings (model)
+	$ddl$;
+
+	RAISE NOTICE 'pgvector: article_embeddings ready';
+EXCEPTION
+	WHEN feature_not_supported OR undefined_file THEN
+		-- SQLSTATE 0A000: pgvector .so not installed on the Postgres host.
+		-- The most common case for CI + fresh docker environments.
+		RAISE NOTICE 'pgvector not installed on this Postgres — skipping article_embeddings. Semantic search will be disabled at runtime (SemanticSearch returns 503).';
+	WHEN undefined_object THEN
+		-- vector type unavailable for some other reason (e.g. superuser
+		-- rejected CREATE EXTENSION). Same graceful skip.
+		RAISE NOTICE 'pgvector types not found — skipping article_embeddings';
+END
+$$;

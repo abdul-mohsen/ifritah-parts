@@ -3,7 +3,11 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // SemanticSearch queries article_embeddings by cosine similarity so
@@ -81,6 +85,14 @@ func (s *SemanticSearch) Search(ctx context.Context, query string, topK int) ([]
 
 	rows, err := s.pg.QueryContext(ctx, q, vecStr, topK)
 	if err != nil {
+		// Soft-fail when pgvector isn't installed on this Postgres
+		// (article_embeddings table absent, or vector type undefined).
+		// Migration 000019 no-ops when pgvector is missing; the runtime
+		// keeps working with semantic-search disabled — same shape as
+		// EMBEDDER_SOCKET being unset.
+		if isPgvectorMissing(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("semantic search query: %w", err)
 	}
 	defer rows.Close()
@@ -119,3 +131,37 @@ func vectorToPgString(v []float32) string {
 	buf = append(buf, ']')
 	return string(buf)
 }
+
+// isPgvectorMissing returns true when the error indicates the semantic-
+// search infrastructure isn't installed on this Postgres:
+//   - article_embeddings table missing (relation does not exist)
+//   - vector type missing (undefined_object)
+//
+// Both are the expected shape when migration 000019 no-op'd due to a
+// missing pgvector extension. Callers turn the error into a soft "no
+// results" so the endpoint returns 200 with an empty result set rather
+// than a 500.
+func isPgvectorMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	// pgx surfaces a *pgconn.PgError with SQLSTATE codes when the
+	// underlying Postgres returns a structured error.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "42P01": // undefined_table (relation does not exist)
+			return true
+		case "42704": // undefined_object (type "vector" does not exist)
+			return true
+		}
+	}
+	// Fallback: match on message when the driver didn't surface a
+	// typed error (defensive for tests + odd wrapped-error paths).
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "relation") && strings.Contains(msg, "article_embeddings") && strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "type") && strings.Contains(msg, "vector") && strings.Contains(msg, "does not exist")
+}
+
+// suppress unused import warning when the driver isn't referenced elsewhere
+var _ = sql.ErrNoRows
