@@ -446,41 +446,58 @@ collectLoop:
 		results = filtered
 	}
 
-	// M1.S3.T2: category-consistency validation. When the queried OEM
-	// decodes to a known part-family, drop any result whose description
-	// doesn't contain a single token from the expected category label.
-	// This catches wrong-category hallucinations that the M1.S1 penalty
-	// only demotes but doesn't remove (mirror OEM 86391-* returning
-	// "Headlight Assembly" — headlight doesn't overlap with "mirrors"
-	// tokens so it gets dropped entirely).
+	// M1.S3.T2 (v2 — 2026-08-25 post-deploy audit): the previous hard-drop
+	// of results whose description didn't overlap CategoryTokensForOEM
+	// was overreaching. Post-deploy F1_correct on the seeded slice
+	// regressed 0.71 → 0.59 because the prefixMap has WRONG 3-digit
+	// mappings that produce wrong expected tokens:
 	//
-	// Opt-in only:
-	//   1. nil expected-tokens means the OEM doesn't decode; pass through.
-	//   2. Partial-OEM stems (e.g. "97133") have prefix ambiguity — the
-	//      3-digit "971" decodes to Compressor A/C, but real HK data for
-	//      that stem often contains Cabin Air Filter. Only apply the
-	//      drop when the queried OEM normalises to a FULL 5-5 form
-	//      (>= 10 normalised chars); the M1.S1 penalty still demotes
-	//      cross-family stem results.
+	//   28113-* -> prefix "281" -> "Radiator" (real: Air Filter)
+	//   97133-* -> prefix "971" -> "Compressor A/C" (real: Cabin Air Filter)
+	//   82460-* -> prefix "82"  -> "Glass/Windshield" (real: Power Window Motor)
+	//
+	// Result: 54 legitimate seeded-slice TPs were dropped because their
+	// descriptions correctly said "AIR FILTER" / "CABIN FILTER" / "POWER
+	// WINDOW MOTOR" but the derived tokens said [radiator] / [compressor]
+	// / [glass windshield].
+	//
+	// Softer approach: extend the M1.S1 confidence penalty instead of
+	// dropping. When a result has ZERO overlap with the expected tokens
+	// AND came from a fallback strategy, multiply confidence by an
+	// additional 0.5 (compounds with the cross-family 0.2 if both fire).
+	// The result stays in the response for the user to see; it just
+	// sorts lower than any same-category alternative.
+	//
+	// This preserves recall on categories the prefixMap mis-labels while
+	// still down-ranking obviously-wrong hits. The M1.S3.T3 audit-tool
+	// diagnostic still surfaces which categories trigger the penalty so
+	// operators can fix the prefixMap systematically over time.
 	if req.OEM != "" {
 		normalizedOEM := NormalizeOEM(req.OEM)
 		if len(normalizedOEM) >= 10 {
 			expected := CategoryTokensForOEM(req.OEM)
 			if len(expected) > 0 {
-				kept := results[:0]
-				dropped := 0
-				for _, r := range results {
-					if hasCategoryOverlap(r.Description, expected) {
-						kept = append(kept, r)
+				penalised := 0
+				for i := range results {
+					if hasCategoryOverlap(results[i].Description, expected) {
 						continue
 					}
-					dropped++
+					// No overlap — apply the softer penalty for
+					// fallback strategies (cache / legacy /
+					// prefix_inference). Non-fallback strategies
+					// (exact_oem etc.) are trusted; leave them alone.
+					primary := firstStrategyOf(results[i].SourceStrategy)
+					isFallback := primary == "cache" || primary == "legacy" || primary == "prefix_inference"
+					if !isFallback {
+						continue
+					}
+					results[i].Confidence *= 0.5
+					penalised++
 				}
-				if dropped > 0 {
-					log.Printf("[Combined] category-mismatch DROPPED %d/%d results for oem=%q expected_tokens=%v",
-						dropped, len(results), req.OEM, expected)
+				if penalised > 0 {
+					log.Printf("[Combined] category-mismatch penalised %d/%d results for oem=%q expected_tokens=%v (no hard drop)",
+						penalised, len(results), req.OEM, expected)
 				}
-				results = kept
 			}
 		}
 	}
