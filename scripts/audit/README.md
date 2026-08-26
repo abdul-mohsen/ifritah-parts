@@ -3,16 +3,21 @@
 Reusable PowerShell scripts for measuring end-to-end search quality against any
 deployed environment. Two-phase workflow:
 
-1. **`audit-quality.ps1`** — runs a corpus of OEMs through the search API and
+1. **`audit-quality.ps1`** - runs a corpus of OEMs through the search API and
    captures the raw response (hit / miss, first result description + brand +
    category, enrichment coverage) into a dated CSV.
 
-2. **`analyze-quality.ps1`** — reads the raw CSV and emits four dated slices
+2. **`analyze-quality.ps1`** - reads the raw CSV and emits four dated slices
    (per-category, per-system, per-slice, per-failure) plus a human-readable
    summary. Computes TP / FP / FN / F1 with a `GoodTokens` category match.
 
 Every run stamps its outputs with `yyyy-MM-dd_HHmm` so results are cumulative
 and comparable across deploys.
+
+> **Prefer one-command engine-health check?** See
+> [`scripts/engine-health-check.md`](../engine-health-check.md) — orchestrates
+> this audit + the TecDoc MySQL diagnostic + a delta comparison into a single
+> combined report at `docs/reports/{date}-engine-health/summary.md`.
 
 ## Quick start
 
