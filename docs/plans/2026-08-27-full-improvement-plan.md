@@ -16,6 +16,8 @@
 | Use free public search interfaces as a "search tool" | Federated on-demand meta-search across sources that either (a) have an official API or (b) publish schema.org-marked machine-readable data on public reference pages |
 | Cache their results | Postgres cache table with configurable TTL per source; refresh on cache miss |
 
+**Relationship to M7 (AI/ML matching):** This plan targets Dim 3 via M8 (online-search aggregation). M7 remains a longer-term ML play that depends on M0-M6 finishing + M8 producing training-data signal (`aftermarket_online_cache` rows can seed the analogical-inference model in M7.S1). M7 is not part of the $0 5-wave plan below; it stays on the roadmap for post-Wave-5 evaluation.
+
 ---
 
 ## Target scores (revised for no-paid path)
