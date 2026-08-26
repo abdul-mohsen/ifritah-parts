@@ -97,6 +97,13 @@ func (f *EbayFinder) Enabled() bool {
 // RateLimit returns the minimum interval between outbound eBay calls.
 func (f *EbayFinder) RateLimit() time.Duration { return ebayRateInterval }
 
+// TrustScore returns the trust tier for eBay Motors results. eBay item
+// titles are seller-provided so brand attribution is noisier than
+// brand-direct or dealer sources — we use the marketplace-noisy tier
+// to demote eBay results below authoritative sources when the same
+// part appears in multiple.
+func (f *EbayFinder) TrustScore() float64 { return TrustMarketplaceNoisy }
+
 // Search queries the Finding API for the OEM and returns aftermarket
 // parts with brand + part-number + price + click-through URL populated.
 // Returns (nil, nil) if the source is disabled or the OEM is empty.

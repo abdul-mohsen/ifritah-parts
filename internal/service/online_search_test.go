@@ -12,18 +12,20 @@ import (
 
 // mockOnlineSource is a hand-rolled fake used by the dispatcher tests.
 type mockOnlineSource struct {
-	name     string
-	enabled  bool
-	rate     time.Duration
-	results  []model.AftermarketPart
-	err      error
-	delay    time.Duration
+	name      string
+	enabled   bool
+	rate      time.Duration
+	trust     float64
+	results   []model.AftermarketPart
+	err       error
+	delay     time.Duration
 	callCount int32
 }
 
 func (m *mockOnlineSource) Name() string             { return m.name }
 func (m *mockOnlineSource) Enabled() bool            { return m.enabled }
 func (m *mockOnlineSource) RateLimit() time.Duration { return m.rate }
+func (m *mockOnlineSource) TrustScore() float64      { return m.trust }
 func (m *mockOnlineSource) Search(ctx context.Context, oem string) ([]model.AftermarketPart, error) {
 	atomic.AddInt32(&m.callCount, 1)
 	if m.delay > 0 {

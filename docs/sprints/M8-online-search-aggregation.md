@@ -417,3 +417,146 @@ Run the min-report (PR #22) after M8 lands. Additionally:
 | G5 site sends cease-and-desist | Kill switch flips within 5 minutes; delete cached rows for that source; log incident |
 | False-brand attribution from eBay seller titles | Existing `NormalizeBrand` + confidence threshold; if brand unresolvable, drop the result |
 | Cache table grows unbounded | Nightly cron `DELETE FROM aftermarket_online_cache WHERE fetched_at < NOW() - INTERVAL '90 days'` |
+
+---
+
+## Extended source list (Phase B onwards — 25+ additional sources)
+
+See `docs/data-sources/online-sources-catalog.md` for the full 30-source catalog. Summary of sprint IDs for the additional adapters:
+
+### Phase B — highest-ROI adapters (5 sprints)
+
+| # | Sprint | Source | Rationale |
+|---|---|---|---|
+| M8.T13 | AliExpress Affiliate API client | Chinese aftermarket | HUGE inventory, HK-relevant, free tier |
+| M8.T7 | HyundaiPartsDeal.com adapter | Hyundai dealer OEM | Already scoped above; now Phase-B priority |
+| M8.T8 | KiaPartsNow.com adapter | Kia dealer OEM | Sister site; Phase-B priority |
+| M8.T18 | PartsGeek.com adapter | Multi-brand aftermarket retailer | Deep BOSCH / MANN / MAHLE listings for HK |
+| M8.T32 | Emex.ae adapter | UAE / GCC marketplace | Regional inventory + AED prices |
+
+### Phase C — coverage expansion (10 sprints)
+
+| # | Sprint | Source |
+|---|---|---|
+| M8.T13-alt | eBay Buy Browse API (OAuth successor) | Modernize eBay integration |
+| M8.T14 | Amazon PA-API 5.0 client | Amazon Motors category |
+| M8.T9 | 7zap.com adapter | Global OEM + MENA |
+| M8.T19 | CARiD.com adapter | Specialty performance + body |
+| M8.T20 | AutoZone.com adapter | US retailer, Duralast + national brands |
+| M8.T21 | AdvanceAutoParts.com adapter | US retailer |
+| M8.T22 | NAPAOnline.com adapter | NAPA house brands |
+| M8.T23 | 1AAuto.com adapter | Body / suspension DTC |
+| M8.T24 | BuyAutoParts.com adapter | Specialty aftermarket |
+| M8.T33 | Autopedia + regional-dealer aggregator | GCC regional coverage |
+
+### Phase D — brand-direct + reference (10 sprints)
+
+| # | Sprint | Source |
+|---|---|---|
+| M8.T26 | BOSCH Automotive Aftermarket adapter | First-party BOSCH cross-refs |
+| M8.T27 | MANN+HUMMEL catalog adapter | First-party MANN-FILTER |
+| M8.T28 | MAHLE Aftermarket adapter | MAHLE + KNECHT |
+| M8.T29 | DENSO catalog adapter | DENSO electrical |
+| M8.T30 | NGK sparkplug fitment adapter | Spark plugs |
+| M8.T31 | HELLA catalog adapter | Lighting + sensors |
+| M8.T36 | oilfilter-crossreference.com adapter | Filter cross-refs |
+| M8.T37 | Generic category cross-reference adapter | Bearings / spark plugs / brakes / etc. |
+| M8.T35 | Wikidata SPARQL query-expansion aid | Metadata for brand normalization |
+| M8.T25 | Dealer-network aggregator (Suncoast + 50 US Hyundai/Kia dealers) | Deep dealer OEM data |
+
+### Phase E — deferred (evaluated post-Phase-D)
+
+| # | Sprint | Source |
+|---|---|---|
+| M8.T15 | Walmart Open API adapter | US retail |
+| M8.T16 | Rakuten Advertising API adapter | Affiliate aggregator |
+| M8.T17 | Alibaba B2B API adapter | Wholesale Chinese aftermarket |
+| — | Additional country-specific regional adapters (KSA / Kuwait / Oman) | Regional |
+
+### Ratings ceiling per phase
+
+| Sources live | Dim 3 est. | Dim 4 est. | Overall est. |
+|---|:-:|:-:|:-:|
+| Just eBay (current) | 4 | 6 | 6.6 |
+| + Phase B (5 more, 6 total) | 6 | 7 | 7.3 |
+| + Phase C (10 more, 16 total) | 7 | 8 | 7.8 |
+| + Phase D (10 more, 26 total) | 8 | 8 | 8.2 |
+| Full stack (all 30+ live) | 8 | 8 | 8.2 |
+
+Diminishing returns kick in around 15-20 sources — subsequent adapters add convergence signal (trust) rather than new coverage.
+
+### Trust scoring in the merged dispatcher
+
+Every source declares its trust tier when constructed:
+
+```go
+type OnlineSource interface {
+    Name() string
+    Enabled() bool
+    RateLimit() time.Duration
+    TrustScore() float64                                          // 0.6 - 1.0
+    Search(ctx context.Context, oem string) ([]AftermarketPart, error)
+}
+```
+
+Trust score guidelines (from `docs/data-sources/online-sources-catalog.md`):
+
+- **1.00** — brand-direct catalog (BOSCH / MANN / MAHLE / DENSO / NGK / HELLA)
+- **0.90** — official APIs (eBay / AliExpress / Amazon / Walmart / Rakuten)
+- **0.85** — dealer G5 (HyundaiPartsDeal / KiaPartsNow / Suncoast dealers)
+- **0.75** — aftermarket-retailer G5 (PartsGeek / CARiD / AutoZone / NAPA / 1AAuto)
+- **0.70** — regional (Emex / Autopedia)
+- **0.65** — marketplace with seller-provided data (eBay / AliExpress noisy tier)
+- **0.60** — category cross-reference sites
+
+Convergence bonus: results found by ≥2 sources multiply confidence by 1.05, capped at 1.0. Final rank = `trust × convergence × BrandTier`.
+
+### Reusable adapter code shape
+
+Adding a new source is one file (~150-300 lines):
+
+```go
+package service
+
+type NewAdapter struct {
+    client  *http.Client
+    robots  *RobotsGuard // Tier 2 + 3 only — official APIs don't need it
+    baseURL string
+}
+
+func NewNewAdapter(client *http.Client, robots *RobotsGuard) *NewAdapter { ... }
+
+func (a *NewAdapter) Name() string             { return "online:<source>" }
+func (a *NewAdapter) Enabled() bool            { return envOn("ONLINE_<SOURCE>_ENABLED") && a.hasCreds() }
+func (a *NewAdapter) RateLimit() time.Duration { return perSourceInterval }
+func (a *NewAdapter) TrustScore() float64      { return trustTierN }
+func (a *NewAdapter) Search(ctx context.Context, oem string) ([]model.AftermarketPart, error) {
+    if !a.Enabled() { return nil, nil }
+    if a.robots != nil {
+        allowed, _ := a.robots.Allowed(ctx, robotsClientAgent, a.buildURL(oem))
+        if !allowed { return nil, nil }
+    }
+    resp, err := a.doHTTP(ctx, oem)
+    if err != nil { return nil, err }
+    return a.parseResponse(resp, oem)
+}
+```
+
+The dispatcher (`internal/service/online_search.go`) already fans out to `[]OnlineSource`; adding a new adapter is just appending to that slice at construction in `cmd/api/main.go`.
+
+### Feature-flag matrix (env vars)
+
+Each source gets its own kill switch. Recommended defaults for a fresh deploy:
+
+| Variable | qa default | prod default |
+|---|:-:|:-:|
+| `ONLINE_SEARCH_ENABLED` | `true` | `false` (opt-in per-source) |
+| `ONLINE_EBAY_ENABLED` | `true` | `true` after 1 week of qa data |
+| `ONLINE_ALIEXPRESS_ENABLED` | `true` | `true` after quota verification |
+| `ONLINE_HYUNDAIPARTSDEAL_ENABLED` | `true` | `true` after ToS review |
+| `ONLINE_KIAPARTSNOW_ENABLED` | `true` | `true` after ToS review |
+| `ONLINE_PARTSGEEK_ENABLED` | `true` | `true` after ToS review |
+| `ONLINE_EMEX_ENABLED` | `true` | `true` |
+| … all other adapters | `false` | `false` (enable one at a time) |
+
+This lets you ramp up sources progressively while measuring the per-source contribution to `AvgAM_correct` in the nightly audit.
