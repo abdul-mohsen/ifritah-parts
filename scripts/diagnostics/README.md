@@ -6,7 +6,9 @@ Diagnostic SQL scripts you can run against qa (or any deployed env) to find why 
 
 | Task | Database | Script |
 |---|---|---|
-| **TecDoc DB health (start here)** | **qa MySQL (TecDoc)** | **`tecdoc_health_report.sql`** |
+| **TecDoc DB health (start here)** | **qa MySQL/MariaDB (TecDoc)** | **`tecdoc_health_report.sql`** |
+| TecDoc follow-up (v1, partial run) | qa MySQL/MariaDB | `tecdoc_health_report_followup.sql` |
+| **TecDoc minimal follow-up (fast, run after `sql/08`)** | **qa MySQL/MariaDB** | **`tecdoc_health_report_min.sql`** |
 | M0.T1 owned_catalog | qa Postgres | `owned_catalog_postgres.sql` |
 | M0.T2 supersession | qa MySQL (TecDoc) | `supersession_mysql.sql` |
 | M0.T3 vin_assembly | qa Postgres + code trace | `vin_assembly_diagnosis.md` |
@@ -41,6 +43,23 @@ Paste the full output back to me and I'll diagnose:
 - how much of the audit corpus is actually reachable
 - whether language / linkingTargetType filters are eliminating data
 - where the biggest coverage gaps are per HK category
+
+### `tecdoc_health_report_min.sql` — fast follow-up (run after sql/08)
+
+After you apply the `sql/08_articlecriteria_criteria_value_hotfix.sql` migration, run this minimal follow-up to:
+
+- Verify the sql/08 index is used by `FindBySpecMatch` (EXPLAIN section G1)
+- Confirm the 19 real HK corpus OEMs resolve to articles
+- List the REAL aftermarket brands (via `articles.dataSupplierId → ambrand.brandId`) for each corpus OEM — answers the "does TecDoc have Bosch/Mann/Mahle for HK?" question definitively
+- Confirm HK vehicle catalog coverage (Hyundai/Kia/Genesis linkage IDs)
+
+```bash
+mysql --host=<tecdoc-mysql-host> --user=<user> --password --database=<db> \
+      < scripts/diagnostics/tecdoc_health_report_min.sql \
+      > tecdoc-min-$(date +%Y-%m-%d).txt
+```
+
+**Runtime target: <30 seconds total.** All queries use indexed equality lookups only — no LIKE prefix scans over 30M-row tables, no `COUNT(DISTINCT)` over 340M-row tables, no huge IN() subqueries. Compatible with MariaDB 10.3+ and MySQL 5.7 / 8.x.
 
 ### Postgres queries (owned_catalog, catalog wiring)
 
