@@ -1,4 +1,4 @@
-# Online-Search Sources Catalog — 30 sources for Kia/Hyundai aftermarket
+# Online-Search Sources Catalog — 40 sources for Kia/Hyundai aftermarket
 
 **Scope:** free / free-tier sources only. No paid catalog data. Every source below is either (a) an official API with a free tier, (b) a public reference site publishing machine-readable data (schema.org JSON-LD / OpenGraph / structured HTML), or (c) a knowledge graph / SPARQL endpoint. **No scraping in the crawler sense** — everything is either an official API or a public reference page consulted on-demand with `robots.txt` compliance + rate limits.
 
@@ -252,6 +252,125 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **What it gives:** Autodoc-family UK retailer, similar depth
 - **HK coverage:** ⭐⭐⭐⭐
 - **Status:** **Adapter implemented** in `NewOnlineCarPartsAdapter()` (M8.T42)
+
+### 21h. Euro Car Parts 🟡 ⭐⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.eurocarparts.com/search?searchTerm={OEM}`
+- **What it gives:** Largest UK aftermarket retailer, TecDoc-sourced. Deep BOSCH / MANN / MAHLE / TEXTAR / FEBI / LEMFOERDER coverage.
+- **HK coverage:** ⭐⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewEuroCarPartsAdapter()` (M8.T43)
+
+### 21i. O'Reilly Auto Parts 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.oreillyauto.com/search?q={OEM}`
+- **What it gives:** Major US retailer (was overlooked in initial catalog pass). House brands + national aftermarket carriers.
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewOReillyAutoAdapter()` (M8.T44)
+
+### 21j. FCP Euro 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.fcpeuro.com/search?q={OEM}`
+- **What it gives:** European + Asian aftermarket, strong Kia/Hyundai vertical, US delivery
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewFCPEuroAdapter()` (M8.T45)
+
+### 21k. USAutoParts.com 🟡 ⭐⭐⭐
+
+- **URL pattern:** `https://www.usautoparts.com/search?q={OEM}`
+- **What it gives:** US aftermarket specialty
+- **HK coverage:** ⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewUSAutoPartsAdapter()` (M8.T46)
+
+### 21l. JC Whitney 🟡 ⭐⭐⭐
+
+- **URL pattern:** `https://www.jcwhitney.com/search?q={OEM}`
+- **What it gives:** Long-established US retailer, Shopify-based (schema.org standard)
+- **HK coverage:** ⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewJCWhitneyAdapter()` (M8.T47)
+
+### 21m. PartsAvatar.ca 🟡 ⭐⭐⭐
+
+- **URL pattern:** `https://www.partsavatar.ca/search?q={OEM}`
+- **What it gives:** Canadian aftermarket with GCC-market export inventory
+- **HK coverage:** ⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewPartsAvatarAdapter()` (M8.T48)
+
+### 21n. RealOEM.com 🟡 ⭐⭐⭐
+
+- **URL pattern:** `https://www.realoem.com/parts/search?q={OEM}`
+- **What it gives:** Originally BMW catalog reference; expanded to include Hyundai/Kia OEM diagrams + part supersession
+- **HK coverage:** ⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewRealOEMAdapter()` (M8.T49)
+
+### 21o. HyundaiPartsDepartment.com 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.hyundaipartsdepartment.com/search?q={OEM}`
+- **What it gives:** Authoritative Hyundai dealer alternative to HyundaiPartsDeal
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewHyundaiPartsDepartmentAdapter()` (M8.T50)
+
+### 21p. KoreanPartsOnline.com 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.koreanpartsonline.com/search?q={OEM}`
+- **What it gives:** Kia/Hyundai specialty retailer
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewKoreanPartsOnlineAdapter()` (M8.T51)
+
+### 28b. Noon.com 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.noon.com/uae-en/search?q={OEM}`
+- **What it gives:** GCC / MENA regional e-commerce (KSA / UAE / Egypt). Directly maps to user's target market.
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewNoonAdapter()` (M8.T52)
+
+### 28c. Almanea.com.sa 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.almanea.com.sa/search?q={OEM}`
+- **What it gives:** Saudi Arabia aftermarket retailer, direct KSA coverage
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewAlmaneaAdapter()` (M8.T53)
+
+### 27b. VALEO 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://catalog.valeo.com/search?q={OEM}`
+- **What it gives:** First-party VALEO catalog (lighting / sensors / A/C / clutch)
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewValeoAdapter()` (M8.T54)
+
+### 27c. FEBI BILSTEIN 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://partsfinder.febi.com/en/oe-search?oe={OEM}`
+- **What it gives:** FEBI BILSTEIN (suspension + steering + engine mounts)
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewFebiAdapter()` (M8.T55)
+
+### 27d. BREMBO 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://catalog.brembo.com/en/search?q={OEM}`
+- **What it gives:** BREMBO brake components (rotors / pads / calipers)
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewBremboAdapter()` (M8.T56)
+
+### 27e. SKF 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.vsm.skf.com/vsmapi/en/search/oe?oe={OEM}`
+- **What it gives:** SKF bearings + seals + tensioners
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewSKFAdapter()` (M8.T57)
+
+### 27f. Gates 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.gates.com/us/en/search-results.html?q={OEM}`
+- **What it gives:** Gates belts + hoses + tensioners
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewGatesAdapter()` (M8.T58)
+
+### 27g. NGK 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.ngk.com/product-lookup?q={OEM}`
+- **What it gives:** NGK spark plugs + coils + O2 sensors
+- **HK coverage:** ⭐⭐⭐⭐ (NGK is factory-fill for many HK ignition components)
+- **Status:** **Adapter implemented** in `NewNGKAdapter()` (M8.T59)
 
 ---
 

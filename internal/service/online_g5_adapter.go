@@ -483,6 +483,242 @@ func NewOnlineCarPartsAdapter(client *http.Client, robots *RobotsGuard) *Generic
 	}, client, robots)
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// ADDITIONAL SOURCES (post-review — user pushback on overlooked sources)
+// ═══════════════════════════════════════════════════════════════════════
+
+// NewEuroCarPartsAdapter — M8.T43. eurocarparts.com — largest UK
+// aftermarket retailer. Massive TecDoc-sourced inventory.
+func NewEuroCarPartsAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:eurocarparts",
+		EnvFlag:      "ONLINE_EUROCARPARTS_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.eurocarparts.com/search?searchTerm=" + oem
+		},
+	}, client, robots)
+}
+
+// NewOReillyAutoAdapter — M8.T44. oreillyauto.com — major US retailer.
+// Big miss in the initial 30-source pass.
+func NewOReillyAutoAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:oreilly",
+		EnvFlag:      "ONLINE_OREILLY_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.oreillyauto.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewFCPEuroAdapter — M8.T45. fcpeuro.com — European + Asian aftermarket,
+// strong Hyundai/Kia focus in the Asian vertical.
+func NewFCPEuroAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:fcpeuro",
+		EnvFlag:      "ONLINE_FCPEURO_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.fcpeuro.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewUSAutoPartsAdapter — M8.T46. usautoparts.com — US aftermarket.
+func NewUSAutoPartsAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:usautoparts",
+		EnvFlag:      "ONLINE_USAUTOPARTS_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.usautoparts.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewJCWhitneyAdapter — M8.T47. jcwhitney.com — long-established US
+// retailer, Shopify-based (schema.org standard).
+func NewJCWhitneyAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:jcwhitney",
+		EnvFlag:      "ONLINE_JCWHITNEY_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.jcwhitney.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewPartsAvatarAdapter — M8.T48. partsavatar.ca — Canadian aftermarket
+// with GCC-market export inventory.
+func NewPartsAvatarAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:partsavatar",
+		EnvFlag:      "ONLINE_PARTSAVATAR_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.partsavatar.ca/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewRealOEMAdapter — M8.T49. realoem.com — originally BMW-focused,
+// expanded to include Hyundai/Kia parts diagrams + OEM references.
+// TrustDealerG5 because it's a catalog reference (not a retailer).
+func NewRealOEMAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:realoem",
+		EnvFlag:      "ONLINE_REALOEM_ENABLED",
+		TrustTier:    TrustDealerG5,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.realoem.com/parts/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewHyundaiPartsDepartmentAdapter — M8.T50. hyundaipartsdepartment.com
+// — authoritative dealer alternative to HyundaiPartsDeal.
+func NewHyundaiPartsDepartmentAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:hyundaipartsdepartment",
+		EnvFlag:      "ONLINE_HYUNDAIPARTSDEPARTMENT_ENABLED",
+		TrustTier:    TrustDealerG5,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.hyundaipartsdepartment.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewKoreanPartsOnlineAdapter — M8.T51. koreanpartsonline.com — Kia/Hyundai
+// specialty retailer.
+func NewKoreanPartsOnlineAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:koreanpartsonline",
+		EnvFlag:      "ONLINE_KOREANPARTSONLINE_ENABLED",
+		TrustTier:    TrustDealerG5,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.koreanpartsonline.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewNoonAdapter — M8.T52. noon.com — GCC / MENA regional e-commerce
+// (KSA / UAE / Egypt). Directly maps to user's target market.
+func NewNoonAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:noon",
+		EnvFlag:      "ONLINE_NOON_ENABLED",
+		TrustTier:    TrustRegional,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.noon.com/uae-en/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewAlmaneaAdapter — M8.T53. almanea.com.sa — Saudi Arabia aftermarket
+// retailer. Direct KSA-market coverage.
+func NewAlmaneaAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:almanea",
+		EnvFlag:      "ONLINE_ALMANEA_ENABLED",
+		TrustTier:    TrustRegional,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.almanea.com.sa/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewValeoAdapter — M8.T54. valeo.com brand-direct catalog.
+func NewValeoAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:valeo",
+		EnvFlag:      "ONLINE_VALEO_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://catalog.valeo.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewFebiAdapter — M8.T55. febi.com brand-direct (FEBI BILSTEIN).
+func NewFebiAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:febi",
+		EnvFlag:      "ONLINE_FEBI_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://partsfinder.febi.com/en/oe-search?oe=" + oem
+		},
+	}, client, robots)
+}
+
+// NewBremboAdapter — M8.T56. brembo.com brand-direct.
+func NewBremboAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:brembo",
+		EnvFlag:      "ONLINE_BREMBO_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://catalog.brembo.com/en/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewSKFAdapter — M8.T57. skf.com brand-direct bearings + seals.
+func NewSKFAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:skf",
+		EnvFlag:      "ONLINE_SKF_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.vsm.skf.com/vsmapi/en/search/oe?oe=" + oem
+		},
+	}, client, robots)
+}
+
+// NewGatesAdapter — M8.T58. gates.com brand-direct belts + hoses.
+func NewGatesAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:gates",
+		EnvFlag:      "ONLINE_GATES_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.gates.com/us/en/search-results.html?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewNGKAdapter — M8.T59. ngk.com brand-direct spark plug fitment.
+func NewNGKAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:ngk",
+		EnvFlag:      "ONLINE_NGK_ENABLED",
+		TrustTier:    TrustBrandDirect,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.ngk.com/product-lookup?q=" + oem
+		},
+	}, client, robots)
+}
+
 // AllG5AdaptersDefaultOff returns the full G5 adapter roster with a
 // shared http.Client + RobotsGuard. Every adapter is env-flag gated so
 // nothing fires unless the operator explicitly enables it. This is the
@@ -506,9 +742,15 @@ func AllG5AdaptersDefaultOff(client *http.Client, robots *RobotsGuard) []OnlineS
 		client = &http.Client{Timeout: 8 * time.Second}
 	}
 	return []OnlineSource{
+		// Kia/Hyundai dealer OEM references (highest HK relevance)
 		NewHyundaiPartsDealAdapter(client, robots),
 		NewKiaPartsNowAdapter(client, robots),
+		NewHyundaiPartsDepartmentAdapter(client, robots),
+		NewKoreanPartsOnlineAdapter(client, robots),
 		New7ZapAdapter(client, robots),
+		NewRealOEMAdapter(client, robots),
+
+		// US aftermarket retailers
 		NewPartsGeekAdapter(client, robots),
 		NewCARiDAdapter(client, robots),
 		NewAutoZoneAdapter(client, robots),
@@ -516,19 +758,40 @@ func AllG5AdaptersDefaultOff(client *http.Client, robots *RobotsGuard) []OnlineS
 		NewNAPAOnlineAdapter(client, robots),
 		New1AAutoAdapter(client, robots),
 		NewBuyAutoPartsAdapter(client, robots),
-		NewEmexAdapter(client, robots),
-		NewOilFilterCrossRefAdapter(client, robots),
-		NewBoschAftermarketAdapter(client, robots),
-		NewMannFilterAdapter(client, robots),
-		NewMahleAftermarketAdapter(client, robots),
-		NewDensoCatalogAdapter(client, robots),
-		NewHellaCatalogAdapter(client, robots),
-		// European aftermarket retailers — TecDoc-sourced, strong HK coverage
+		NewOReillyAutoAdapter(client, robots),
+		NewFCPEuroAdapter(client, robots),
+		NewUSAutoPartsAdapter(client, robots),
+		NewJCWhitneyAdapter(client, robots),
+		NewPartsAvatarAdapter(client, robots),
+
+		// European aftermarket retailers — TecDoc-sourced
 		NewAutodocAdapter(client, robots),
 		NewAutodocDEAdapter(client, robots),
 		NewOscaroAdapter(client, robots),
 		NewGSFCarPartsAdapter(client, robots),
 		NewMicksGarageAdapter(client, robots),
 		NewOnlineCarPartsAdapter(client, robots),
+		NewEuroCarPartsAdapter(client, robots),
+
+		// GCC / MENA regional (user's target market)
+		NewEmexAdapter(client, robots),
+		NewNoonAdapter(client, robots),
+		NewAlmaneaAdapter(client, robots),
+
+		// Brand-direct catalogs (highest trust tier)
+		NewBoschAftermarketAdapter(client, robots),
+		NewMannFilterAdapter(client, robots),
+		NewMahleAftermarketAdapter(client, robots),
+		NewDensoCatalogAdapter(client, robots),
+		NewHellaCatalogAdapter(client, robots),
+		NewValeoAdapter(client, robots),
+		NewFebiAdapter(client, robots),
+		NewBremboAdapter(client, robots),
+		NewSKFAdapter(client, robots),
+		NewGatesAdapter(client, robots),
+		NewNGKAdapter(client, robots),
+
+		// Category cross-reference
+		NewOilFilterCrossRefAdapter(client, robots),
 	}
 }

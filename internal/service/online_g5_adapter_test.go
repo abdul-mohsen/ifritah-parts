@@ -186,12 +186,12 @@ func TestGenericG5Adapter_5xxReturnsErr(t *testing.T) {
 }
 
 // TestAllG5AdaptersDefaultOff_ReturnsAllAdapters — smoke test for the
-// registry constructor. Expects ≥ 20 adapters (17 initial + 6 European
-// retailers added post-review).
+// registry constructor. Expects ≥ 35 adapters (initial 17 + Autodoc-family
+// 6 + post-review overlooked 17 = 40 total).
 func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
 	adapters := AllG5AdaptersDefaultOff(nil, nil)
-	if len(adapters) < 20 {
-		t.Errorf("expected ≥20 G5 adapters, got %d", len(adapters))
+	if len(adapters) < 35 {
+		t.Errorf("expected ≥35 G5 adapters, got %d", len(adapters))
 	}
 	// Every adapter has a distinct name.
 	seen := map[string]bool{}
@@ -205,12 +205,27 @@ func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
 		}
 		seen[a.Name()] = true
 	}
-	// Autodoc must be present (was mistakenly excluded in the initial
-	// pass; user pushback restored it — this guards the fix).
-	if !seen["online:autodoc"] {
-		t.Errorf("online:autodoc missing from default roster")
+	// Guard against future regressions on user-explicitly-called-out sources.
+	for _, mustHave := range []string{
+		"online:autodoc",          // user pushback restored (was excluded in error)
+		"online:hyundaipartsdeal", // authoritative Hyundai OEM ref
+		"online:kiapartsnow",      // authoritative Kia OEM ref
+		"online:eurocarparts",     // biggest UK aftermarket retailer
+		"online:oreilly",          // major US retailer (was overlooked)
+		"online:noon",             // MENA e-commerce (user's target market)
+		"online:almanea",          // KSA regional (user's target market)
+		"online:bosch",            // brand-direct BOSCH
+		"online:mann",             // brand-direct MANN-FILTER
+		"online:mahle",            // brand-direct MAHLE
+		"online:valeo",            // brand-direct VALEO (overlooked)
+		"online:febi",             // brand-direct FEBI (overlooked)
+		"online:brembo",           // brand-direct BREMBO (overlooked)
+	} {
+		if !seen[mustHave] {
+			t.Errorf("%s missing from default roster", mustHave)
+		}
 	}
-	// Every adapter has a positive rate limit + trust tier.
+	// Every adapter has a positive rate limit + valid trust tier.
 	for _, a := range adapters {
 		if a.RateLimit() <= 0 {
 			t.Errorf("%s: RateLimit() should be > 0, got %v", a.Name(), a.RateLimit())
@@ -228,7 +243,10 @@ func TestAllG5AdaptersDefaultOff_DisabledByDefault(t *testing.T) {
 	for _, f := range []string{
 		"ONLINE_HYUNDAIPARTSDEAL_ENABLED",
 		"ONLINE_KIAPARTSNOW_ENABLED",
+		"ONLINE_HYUNDAIPARTSDEPARTMENT_ENABLED",
+		"ONLINE_KOREANPARTSONLINE_ENABLED",
 		"ONLINE_7ZAP_ENABLED",
+		"ONLINE_REALOEM_ENABLED",
 		"ONLINE_PARTSGEEK_ENABLED",
 		"ONLINE_CARID_ENABLED",
 		"ONLINE_AUTOZONE_ENABLED",
@@ -236,19 +254,33 @@ func TestAllG5AdaptersDefaultOff_DisabledByDefault(t *testing.T) {
 		"ONLINE_NAPA_ENABLED",
 		"ONLINE_1AAUTO_ENABLED",
 		"ONLINE_BUYAUTOPARTS_ENABLED",
-		"ONLINE_EMEX_ENABLED",
-		"ONLINE_OILFILTER_XREF_ENABLED",
-		"ONLINE_BOSCH_ENABLED",
-		"ONLINE_MANN_ENABLED",
-		"ONLINE_MAHLE_ENABLED",
-		"ONLINE_DENSO_ENABLED",
-		"ONLINE_HELLA_ENABLED",
+		"ONLINE_OREILLY_ENABLED",
+		"ONLINE_FCPEURO_ENABLED",
+		"ONLINE_USAUTOPARTS_ENABLED",
+		"ONLINE_JCWHITNEY_ENABLED",
+		"ONLINE_PARTSAVATAR_ENABLED",
 		"ONLINE_AUTODOC_ENABLED",
 		"ONLINE_AUTODOC_DE_ENABLED",
 		"ONLINE_OSCARO_ENABLED",
 		"ONLINE_GSFCARPARTS_ENABLED",
 		"ONLINE_MICKSGARAGE_ENABLED",
 		"ONLINE_ONLINECARPARTS_ENABLED",
+		"ONLINE_EUROCARPARTS_ENABLED",
+		"ONLINE_EMEX_ENABLED",
+		"ONLINE_NOON_ENABLED",
+		"ONLINE_ALMANEA_ENABLED",
+		"ONLINE_BOSCH_ENABLED",
+		"ONLINE_MANN_ENABLED",
+		"ONLINE_MAHLE_ENABLED",
+		"ONLINE_DENSO_ENABLED",
+		"ONLINE_HELLA_ENABLED",
+		"ONLINE_VALEO_ENABLED",
+		"ONLINE_FEBI_ENABLED",
+		"ONLINE_BREMBO_ENABLED",
+		"ONLINE_SKF_ENABLED",
+		"ONLINE_GATES_ENABLED",
+		"ONLINE_NGK_ENABLED",
+		"ONLINE_OILFILTER_XREF_ENABLED",
 	} {
 		t.Setenv(f, "false")
 	}
