@@ -47,10 +47,11 @@ Each milestone ships a measurable slice of the north-star. Every milestone ends 
 | M4 | **Beyond TecDoc** — RockAuto + regional supplier + dealer + community | AvgAM adds +3 from non-TecDoc sources; F1_correct on body/glass ≥ 0.90 | 4 |
 | M5 | **Search intelligence** — semantic, VIN, cross-suggest | VIN → parts F1 ≥ 0.80; description-similarity recall + 10 pts on unseeded slice | 3 |
 | M6 | **Production-grade** — continuous audit CI, feedback loop, cost SLA | Every PR blocked if F1_correct regresses; p95 ≤ 3 s; monthly cost audit | 2 |
+| M8 | **Online-search aggregation** — free/public sources meta-search + cache for HK aftermarket | `AvgAM_online` ≥ 3 aftermarket brands per corpus OEM at $0 committed spend | 12 |
 
-Total: **18 sprints** (~8-11 months at 1 sprint / 2 weeks).
+Total: **30 sprints** (~10-13 months at 1 sprint / 2 weeks).
 
-**Merge order matters.** M0 unblocks the strategies that M2 (`supersession` walker), M3 (`vehicle_fitment` for vehicle enrichment), and M5 (`vin_assembly`) will build on. Skip M0 and the later milestones are building on broken foundations.
+**Merge order matters.** M0 unblocks the strategies that M2 (`supersession` walker), M3 (`vehicle_fitment` for vehicle enrichment), and M5 (`vin_assembly`) will build on. Skip M0 and the later milestones are building on broken foundations. **M8** is the free/public-source aftermarket fill; it can run in parallel with M0-M6 code fixes but its exit gate depends on Wave-2 code fixes (`mfrId` bug, sql/08) being live in prod.
 
 ---
 
