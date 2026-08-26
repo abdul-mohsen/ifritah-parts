@@ -33,6 +33,61 @@ Disallow: /
 	}
 }
 
+// TestParseRobots_GroupResetOnNewUserAgent verifies the parser's
+// group-boundary semantics: a User-agent line after a rule line starts a
+// NEW group and the agent list resets, so BadBot's Disallow doesn't
+// accidentally also apply to '*' from the previous group.
+func TestParseRobots_GroupResetOnNewUserAgent(t *testing.T) {
+	body := []byte(`
+User-agent: *
+Disallow: /admin/
+
+User-agent: BadBot
+Disallow: /
+`)
+	rules := parseRobots(body)
+
+	// Count rules per user-agent.
+	byAgent := map[string]int{}
+	for _, r := range rules {
+		byAgent[r.userAgent]++
+	}
+	// '*' should have exactly 1 Disallow (/admin/) and NOT be tagged with
+	// the BadBot Disallow /.
+	if byAgent["*"] != 1 {
+		t.Errorf("expected 1 rule for '*', got %d — group reset failed", byAgent["*"])
+	}
+	if byAgent["badbot"] != 1 {
+		t.Errorf("expected 1 rule for 'badbot', got %d", byAgent["badbot"])
+	}
+	// Verify '*' does NOT have "Disallow: /" (which would erroneously block everything).
+	for _, r := range rules {
+		if r.userAgent == "*" && r.prefix == "/" && !r.allow {
+			t.Errorf("'*' erroneously inherited BadBot's Disallow: /")
+		}
+	}
+}
+
+// TestParseRobots_MultipleAgentsInOneGroup verifies that multiple
+// User-agent lines followed by a single rule apply the rule to ALL
+// listed agents (standard multi-agent-group behaviour).
+func TestParseRobots_MultipleAgentsInOneGroup(t *testing.T) {
+	body := []byte(`
+User-agent: BotA
+User-agent: BotB
+Disallow: /forbidden
+`)
+	rules := parseRobots(body)
+	// Both BotA and BotB should have one Disallow /forbidden rule each.
+	byAgent := map[string]int{}
+	for _, r := range rules {
+		byAgent[r.userAgent]++
+	}
+	if byAgent["bota"] != 1 || byAgent["botb"] != 1 {
+		t.Errorf("expected both BotA + BotB to receive the Disallow, got %+v", byAgent)
+	}
+}
+
 func TestRobotsGuard_AllowedWhenNoRules(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/robots.txt" {

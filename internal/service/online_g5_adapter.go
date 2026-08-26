@@ -159,7 +159,7 @@ func (a *GenericG5Adapter) Search(ctx context.Context, oemNormalized string) ([]
 // Each of the following is 5-10 lines wrapping GenericG5Adapter with
 // site-specific URL patterns + trust + rate configuration. Adding a new
 // site is a one-file follow-up: define constructor, verify the site's
-// search URL pattern, register in cmd/api/main.go.
+// search URL pattern, register in cmd/server/main.go.
 
 // NewHyundaiPartsDealAdapter — M8.T7. Authoritative Hyundai OEM
 // reference. Uses schema.org JSON-LD.
@@ -722,7 +722,7 @@ func NewNGKAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
 // AllG5AdaptersDefaultOff returns the full G5 adapter roster with a
 // shared http.Client + RobotsGuard. Every adapter is env-flag gated so
 // nothing fires unless the operator explicitly enables it. This is the
-// recommended shape for wiring in cmd/api/main.go:
+// recommended shape for wiring in cmd/server/main.go:
 //
 //	robots := service.NewRobotsGuard(nil)
 //	client := &http.Client{Timeout: 8 * time.Second}

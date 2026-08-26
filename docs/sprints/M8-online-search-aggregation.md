@@ -542,7 +542,7 @@ func (a *NewAdapter) Search(ctx context.Context, oem string) ([]model.Aftermarke
 }
 ```
 
-The dispatcher (`internal/service/online_search.go`) already fans out to `[]OnlineSource`; adding a new adapter is just appending to that slice at construction in `cmd/api/main.go`.
+The dispatcher (`internal/service/online_search.go`) already fans out to `[]OnlineSource`; adding a new adapter is just appending to that slice at construction in `cmd/server/main.go`.
 
 ### Feature-flag matrix (env vars)
 

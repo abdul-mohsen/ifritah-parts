@@ -239,6 +239,12 @@ func parseRobots(body []byte) []robotsRule {
 	// Some robots.txt files have long lines; bump the buffer.
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
 
+	// Track whether the previous non-blank line was a rule (Disallow /
+	// Allow). Any User-agent line following a rule line starts a NEW
+	// group and must reset the agent list — otherwise agents leak from
+	// one group into the next.
+	inRuleSection := false
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if idx := strings.Index(line, "#"); idx >= 0 {
@@ -257,29 +263,25 @@ func parseRobots(body []byte) []robotsRule {
 
 		switch field {
 		case "user-agent":
+			if inRuleSection {
+				currentAgents = currentAgents[:0]
+				inRuleSection = false
+			}
 			currentAgents = append(currentAgents, strings.ToLower(value))
 		case "disallow":
+			inRuleSection = true
 			if value == "" {
 				continue // no-op per spec
 			}
 			for _, ua := range currentAgents {
 				rules = append(rules, robotsRule{userAgent: ua, prefix: value, allow: false})
 			}
-			currentAgents = collapseAgentsIfNewGroup(currentAgents)
 		case "allow":
+			inRuleSection = true
 			for _, ua := range currentAgents {
 				rules = append(rules, robotsRule{userAgent: ua, prefix: value, allow: true})
 			}
-			currentAgents = collapseAgentsIfNewGroup(currentAgents)
 		}
 	}
 	return rules
-}
-
-// collapseAgentsIfNewGroup returns the same slice — placeholder in case we
-// want to handle multi-agent groups differently. Here we accumulate agents
-// under the current group until any Disallow/Allow line fires, then keep
-// accumulating until a new User-agent line resets. Standard behaviour.
-func collapseAgentsIfNewGroup(agents []string) []string {
-	return agents
 }

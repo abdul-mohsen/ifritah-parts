@@ -125,7 +125,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product` JSON-LD blocks in page HTML
 - **What it gives:** authoritative Hyundai dealer OEM reference — genuine part description, supersession, exploded diagram category, MSRP
 - **HK coverage:** ⭐⭐⭐⭐⭐ Hyundai gold-standard
-- **Status:** planned M8.T7
+- **Status:** **Adapter implemented** in `NewHyundaiPartsDealAdapter()` (M8.T7)
 
 ### 12. KiaPartsNow.com 🟡 ⭐⭐⭐⭐⭐
 
@@ -133,7 +133,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product` JSON-LD
 - **What it gives:** authoritative Kia dealer OEM reference — sister site to HyundaiPartsDeal
 - **HK coverage:** ⭐⭐⭐⭐⭐ Kia gold-standard
-- **Status:** planned M8.T8
+- **Status:** **Adapter implemented** in `NewKiaPartsNowAdapter()` (M8.T8)
 
 ### 13. 7zap.com 🟡 ⭐⭐⭐⭐
 
@@ -141,7 +141,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** mostly structured HTML with product tables; some schema.org
 - **What it gives:** global OEM catalog with MENA inventory, exploded diagrams, cross-references
 - **HK coverage:** ⭐⭐⭐⭐ good MENA-market fit
-- **Status:** planned M8.T9
+- **Status:** **Adapter implemented** in `New7ZapAdapter()` (M8.T9)
 
 ### 14. PartsGeek.com 🟡 ⭐⭐⭐⭐
 
@@ -149,7 +149,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** OpenGraph + schema.org `Product`
 - **What it gives:** ~200 aftermarket brand carrier — Beck-Arnley, CRP, Denso, Mopar, Motorcraft, etc.
 - **HK coverage:** ⭐⭐⭐⭐ strong aftermarket coverage for popular HK OEMs
-- **Status:** planned M8.T18
+- **Status:** **Adapter implemented** in `NewPartsGeekAdapter()` (M8.T18)
 
 ### 15. CARiD.com 🟡 ⭐⭐⭐
 
@@ -157,7 +157,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product`
 - **What it gives:** specialty parts retailer with aftermarket + performance brands
 - **HK coverage:** ⭐⭐⭐ good for performance + body/lighting
-- **Status:** planned M8.T19
+- **Status:** **Adapter implemented** in `NewCARiDAdapter()` (M8.T19)
 
 ### 16. AutoZone.com 🟡 ⭐⭐⭐
 
@@ -165,7 +165,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product` + JSON-LD offer blocks
 - **What it gives:** US retailer with Duralast (house brand) + national aftermarket brands
 - **HK coverage:** ⭐⭐⭐ US-focused but strong on filters/brakes
-- **Status:** planned M8.T20
+- **Status:** **Adapter implemented** in `NewAutoZoneAdapter()` (M8.T20)
 
 ### 17. AdvanceAutoParts.com 🟡 ⭐⭐⭐
 
@@ -173,7 +173,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product`
 - **What it gives:** competitor to AutoZone; carries Wearever, Autolite, etc.
 - **HK coverage:** ⭐⭐⭐ similar to AutoZone
-- **Status:** planned M8.T21
+- **Status:** **Adapter implemented** in `NewAdvanceAutoPartsAdapter()` (M8.T21)
 
 ### 18. NAPAOnline.com 🟡 ⭐⭐⭐
 
@@ -181,7 +181,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product`
 - **What it gives:** NAPA house brands + national aftermarket carriers
 - **HK coverage:** ⭐⭐⭐
-- **Status:** planned M8.T22
+- **Status:** **Adapter implemented** in `NewNAPAOnlineAdapter()` (M8.T22)
 
 ### 19. 1AAuto.com 🟡 ⭐⭐⭐
 
@@ -189,7 +189,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product`
 - **What it gives:** direct-to-consumer aftermarket; body + suspension focus
 - **HK coverage:** ⭐⭐⭐ strong body/collision coverage
-- **Status:** planned M8.T23
+- **Status:** **Adapter implemented** in `New1AAutoAdapter()` (M8.T23)
 
 ### 20. BuyAutoParts.com 🟡 ⭐⭐⭐
 
@@ -197,7 +197,7 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **Data format:** schema.org `Product`
 - **What it gives:** aftermarket specialty, EGR/turbo/etc. deeper stock
 - **HK coverage:** ⭐⭐⭐
-- **Status:** planned M8.T24
+- **Status:** **Adapter implemented** in `NewBuyAutoPartsAdapter()` (M8.T24)
 
 ### 21. Suncoast Hyundai/Kia Parts (dealer) 🟡 ⭐⭐⭐⭐
 
@@ -384,7 +384,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** returns JSON via XHR; can be parsed
 - **What it gives:** first-party BOSCH catalog with OEM cross-refs for Kia/Hyundai
 - **HK coverage:** ⭐⭐⭐⭐⭐ authoritative BOSCH data
-- **Status:** planned M8.T26 (partner-API upgrade path available for free with distributor agreement)
+- **Status:** **Adapter implemented** in `NewBoschAftermarketAdapter()` (M8.T26 — partner-API upgrade path available for free with distributor agreement)
 
 ### 23. MANN+HUMMEL Product Catalog 🟡 ⭐⭐⭐⭐⭐
 
@@ -392,7 +392,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** JSON via XHR endpoints
 - **What it gives:** authoritative MANN-FILTER catalog with HK cross-refs
 - **HK coverage:** ⭐⭐⭐⭐⭐
-- **Status:** planned M8.T27
+- **Status:** **Adapter implemented** in `NewMannFilterAdapter()` (M8.T27)
 
 ### 24. MAHLE Aftermarket 🟡 ⭐⭐⭐⭐
 
@@ -400,7 +400,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** structured HTML with schema.org
 - **What it gives:** MAHLE + KNECHT catalog
 - **HK coverage:** ⭐⭐⭐⭐
-- **Status:** planned M8.T28
+- **Status:** **Adapter implemented** in `NewMahleAftermarketAdapter()` (M8.T28)
 
 ### 25. DENSO Global Product Catalog 🟡 ⭐⭐⭐⭐
 
@@ -408,7 +408,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** structured HTML
 - **What it gives:** DENSO ignition + electrical for Kia/Hyundai
 - **HK coverage:** ⭐⭐⭐⭐ DENSO is factory-fill for many HK electrical parts
-- **Status:** planned M8.T29
+- **Status:** **Adapter implemented** in `NewDensoCatalogAdapter()` (M8.T29)
 
 ### 26. NGK Sparkplug Fitment Lookup 🟡 ⭐⭐⭐
 
@@ -416,7 +416,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** JSON via XHR
 - **What it gives:** NGK spark plug fitment for HK vehicles
 - **HK coverage:** ⭐⭐⭐ narrow category but deep coverage
-- **Status:** planned M8.T30 (category-specific — lower priority)
+- **Status:** **Adapter implemented** in `NewNGKAdapter()` (M8.T30 — spark-plug specific)
 
 ### 27. Hella Product Catalog 🟡 ⭐⭐⭐
 
@@ -424,7 +424,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** structured HTML
 - **What it gives:** HELLA lighting + sensors + electronics
 - **HK coverage:** ⭐⭐⭐
-- **Status:** planned M8.T31
+- **Status:** **Adapter implemented** in `NewHellaCatalogAdapter()` (M8.T31)
 
 ---
 
@@ -436,7 +436,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** structured HTML + AJAX endpoints returning JSON
 - **What it gives:** UAE/GCC aftermarket marketplace with real stock levels + AED prices
 - **HK coverage:** ⭐⭐⭐⭐ GCC-inventory-native
-- **Status:** planned M8.T32
+- **Status:** **Adapter implemented** in `NewEmexAdapter()` (M8.T32)
 
 ### 29. Autopedia 🟡 ⭐⭐⭐
 
@@ -473,7 +473,7 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Data format:** structured HTML table
 - **What it gives:** filter cross-references — 519 alternatives for MANN W 811/80 alone (verified benchmark from `reference_engine_comparison_test.go:15`)
 - **HK coverage:** ⭐⭐⭐⭐ deep filter coverage
-- **Status:** planned M8.T36
+- **Status:** **Adapter implemented** in `NewOilFilterCrossRefAdapter()` (M8.T36)
 
 ### 33. Category-specific cross-reference sites 🟡 ⭐⭐⭐
 
@@ -539,48 +539,43 @@ Assuming 1,000 unique OEMs looked up per day post-launch (heavier than qa today)
 
 ## Implementation phasing (updated M8 plan)
 
-### Phase A · already implemented (this PR)
+### Phase A · IMPLEMENTED and wired into Smart Search (this PR)
 
-- Cache table + interface + rate limiter + robots guard + dispatcher
-- **1 source live:** eBay Motors Finding API
+**41 sources total** wired into `TecDoc.FindAftermarketForOEM` via `WithOnlineSearch()` in `cmd/server/main.go`. Each adapter is env-flag gated and defaults to disabled — the operator enables sources one at a time after qa verification.
 
-### Phase B · next 5 sprints — highest ROI adapters
+Implemented sources by category:
 
-Priorities based on HK relevance + implementation cost:
+**Anchor** (1)
+- eBay Motors Finding API
 
-1. **AliExpress Affiliate API** — free, huge inventory, HK-relevant Chinese aftermarket
-2. **HyundaiPartsDeal.com** (G5) — authoritative Hyundai
-3. **KiaPartsNow.com** (G5) — authoritative Kia
-4. **PartsGeek.com** (G5) — deep aftermarket brand coverage
-5. **Emex.ae** — GCC-native inventory
+**Kia/Hyundai dealer + OEM references** (6)
+- HyundaiPartsDeal.com, KiaPartsNow.com, HyundaiPartsDepartment.com, KoreanPartsOnline.com, 7zap.com, RealOEM.com
 
-### Phase C · sprints 6-15 — coverage expansion
+**US aftermarket retailers** (12)
+- PartsGeek, CARiD, AutoZone, AdvanceAutoParts, NAPA, 1AAuto, BuyAutoParts, O'Reilly, FCPEuro, USAutoParts, JCWhitney, PartsAvatar
 
-6. eBay Buy Browse API (OAuth successor to Finding)
-7. Amazon PA-API
-8. 7zap.com
-9. CARiD.com
-10. AutoZone.com
-11. AdvanceAutoParts.com
-12. NAPAOnline.com
-13. 1AAuto.com
-14. BuyAutoParts.com
-15. Autopedia + dealer-network aggregation
+**European aftermarket retailers** (7)
+- Autodoc UK, Autodoc DE, Oscaro, GSFCarParts, MicksGarage, OnlineCarParts, EuroCarParts
 
-### Phase D · sprints 16-25 — brand-direct + reference
+**GCC / MENA regional** (3)
+- Emex.ae, Noon.com, Almanea.com.sa
 
-16-21. BOSCH / MANN / MAHLE / DENSO / NGK / HELLA brand portals
-22. oilfilter-crossreference.com
-23. Category cross-ref generic adapter
-24. Wikidata query-expansion layer
-25. Trust-scored merger + convergence bonus tuning
+**Brand-direct catalogs** (11)
+- BOSCH, MANN, MAHLE, DENSO, HELLA, VALEO, FEBI, BREMBO, SKF, Gates, NGK
 
-### Phase E · deferred (evaluated post-Phase-D data)
+**Category cross-reference** (1)
+- oilfilter-crossreference.com
 
-- Alibaba B2B (source 7)
-- Walmart Open API (source 5)
-- Rakuten (source 6)
-- Additional regional dealers per country
+### Phase B · deferred (needs external auth or B2B signup)
+
+1. **eBay Buy Browse API** — needs OAuth flow (Finding API adapter already live)
+2. **AliExpress Affiliate API** — needs affiliate signup
+3. **Amazon Product Advertising API** — needs Associates account
+4. **Walmart Open API** — needs developer signup
+5. **Rakuten Advertising API** — needs publisher signup
+6. **Alibaba Open Platform** — needs developer account
+7. **Wikidata SPARQL** — query-expansion aid (not a direct product source)
+8. **Autopedia + HAAS-KO regional aggregators** — need supplier partnerships
 
 ---
 
@@ -613,7 +608,7 @@ func (a *NewAdapter) Search(ctx context.Context, oem string) ([]model.Aftermarke
 }
 ```
 
-The dispatcher (`internal/service/online_search.go`) already fans out to `[]OnlineSource` — new adapters just append to that slice at construction time in `cmd/api/main.go`.
+The dispatcher (`internal/service/online_search.go`) already fans out to `[]OnlineSource` — new adapters just append to that slice at construction time in `cmd/server/main.go`.
 
 ---
 
