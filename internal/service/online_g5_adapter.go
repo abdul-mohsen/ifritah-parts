@@ -384,6 +384,105 @@ func NewHellaCatalogAdapter(client *http.Client, robots *RobotsGuard) *GenericG5
 	}, client, robots)
 }
 
+// NewAutodocAdapter — M8.T38. European aftermarket e-commerce.
+//
+// Autodoc.co.uk publishes schema.org Product markup on its search
+// result pages (SEO requirement — Autodoc is one of the largest
+// European auto-parts e-commerce sites, indexed by Google Shopping).
+// We consume it as a search endpoint the same way Google indexes it:
+// robots.txt-checked, rate-limited, on-demand, User-Agent identified.
+//
+// Coverage: TecDoc-based; carries every major aftermarket brand
+// (BOSCH, MANN, MAHLE, DENSO, VALEO, HELLA, BREMBO, TEXTAR, FEBI,
+// LEMFOERDER, LuK, INA, SKF, GATES, Continental, and hundreds more)
+// with real-time European inventory + prices in GBP / EUR / SEK / etc.
+//
+// TrustTier is AftermarketRetailer — data is retailer-published, not
+// brand-direct, but authoritative because Autodoc IS a TecDoc consumer
+// with contract-verified brand data.
+func NewAutodocAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:autodoc",
+		EnvFlag:      "ONLINE_AUTODOC_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.autodoc.co.uk/search?keyword=" + oem
+		},
+	}, client, robots)
+}
+
+// NewAutodocDEAdapter — M8.T38b. German-market Autodoc (autodoc.de).
+// Different inventory + pricing than the UK site; larger stock. Uses
+// the same schema.org markup, different search URL pattern.
+func NewAutodocDEAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:autodoc-de",
+		EnvFlag:      "ONLINE_AUTODOC_DE_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.autodoc.de/suchen?keyword=" + oem
+		},
+	}, client, robots)
+}
+
+// NewOscaroAdapter — M8.T39. French aftermarket e-commerce.
+// Similar shape to Autodoc but France-native. Deep coverage of
+// European aftermarket brands for HK vehicles sold in Europe.
+func NewOscaroAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:oscaro",
+		EnvFlag:      "ONLINE_OSCARO_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.oscaro.com/recherche?searchTerm=" + oem
+		},
+	}, client, robots)
+}
+
+// NewGSFCarPartsAdapter — M8.T40. UK aftermarket retailer.
+func NewGSFCarPartsAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:gsfcarparts",
+		EnvFlag:      "ONLINE_GSFCARPARTS_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.gsfcarparts.com/search?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewMicksGarageAdapter — M8.T41. Ireland/UK aftermarket retailer.
+// Uses shared TecDoc data so brand coverage is broad.
+func NewMicksGarageAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:micksgarage",
+		EnvFlag:      "ONLINE_MICKSGARAGE_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.micksgarage.com/search/oem?q=" + oem
+		},
+	}, client, robots)
+}
+
+// NewOnlineCarPartsAdapter — M8.T42. onlinecarparts.co.uk — UK retailer
+// with strong TecDoc-sourced aftermarket coverage.
+func NewOnlineCarPartsAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
+	return NewGenericG5Adapter(G5AdapterConfig{
+		Name:         "online:onlinecarparts",
+		EnvFlag:      "ONLINE_ONLINECARPARTS_ENABLED",
+		TrustTier:    TrustAftermarketRetailer,
+		RateInterval: 2 * time.Second,
+		BuildSearchURL: func(oem string) string {
+			return "https://www.onlinecarparts.co.uk/search?keyword=" + oem
+		},
+	}, client, robots)
+}
+
 // AllG5AdaptersDefaultOff returns the full G5 adapter roster with a
 // shared http.Client + RobotsGuard. Every adapter is env-flag gated so
 // nothing fires unless the operator explicitly enables it. This is the
@@ -424,5 +523,12 @@ func AllG5AdaptersDefaultOff(client *http.Client, robots *RobotsGuard) []OnlineS
 		NewMahleAftermarketAdapter(client, robots),
 		NewDensoCatalogAdapter(client, robots),
 		NewHellaCatalogAdapter(client, robots),
+		// European aftermarket retailers — TecDoc-sourced, strong HK coverage
+		NewAutodocAdapter(client, robots),
+		NewAutodocDEAdapter(client, robots),
+		NewOscaroAdapter(client, robots),
+		NewGSFCarPartsAdapter(client, robots),
+		NewMicksGarageAdapter(client, robots),
+		NewOnlineCarPartsAdapter(client, robots),
 	}
 }

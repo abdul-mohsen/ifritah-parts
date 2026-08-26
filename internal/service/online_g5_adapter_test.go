@@ -186,12 +186,12 @@ func TestGenericG5Adapter_5xxReturnsErr(t *testing.T) {
 }
 
 // TestAllG5AdaptersDefaultOff_ReturnsAllAdapters — smoke test for the
-// registry constructor. Expects 17 adapters (the count declared in
-// AllG5AdaptersDefaultOff).
+// registry constructor. Expects ≥ 20 adapters (17 initial + 6 European
+// retailers added post-review).
 func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
 	adapters := AllG5AdaptersDefaultOff(nil, nil)
-	if len(adapters) < 15 {
-		t.Errorf("expected ≥15 G5 adapters, got %d", len(adapters))
+	if len(adapters) < 20 {
+		t.Errorf("expected ≥20 G5 adapters, got %d", len(adapters))
 	}
 	// Every adapter has a distinct name.
 	seen := map[string]bool{}
@@ -204,6 +204,11 @@ func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
 			t.Errorf("duplicate adapter name: %s", a.Name())
 		}
 		seen[a.Name()] = true
+	}
+	// Autodoc must be present (was mistakenly excluded in the initial
+	// pass; user pushback restored it — this guards the fix).
+	if !seen["online:autodoc"] {
+		t.Errorf("online:autodoc missing from default roster")
 	}
 	// Every adapter has a positive rate limit + trust tier.
 	for _, a := range adapters {
@@ -238,6 +243,12 @@ func TestAllG5AdaptersDefaultOff_DisabledByDefault(t *testing.T) {
 		"ONLINE_MAHLE_ENABLED",
 		"ONLINE_DENSO_ENABLED",
 		"ONLINE_HELLA_ENABLED",
+		"ONLINE_AUTODOC_ENABLED",
+		"ONLINE_AUTODOC_DE_ENABLED",
+		"ONLINE_OSCARO_ENABLED",
+		"ONLINE_GSFCARPARTS_ENABLED",
+		"ONLINE_MICKSGARAGE_ENABLED",
+		"ONLINE_ONLINECARPARTS_ENABLED",
 	} {
 		t.Setenv(f, "false")
 	}

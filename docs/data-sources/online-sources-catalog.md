@@ -207,6 +207,52 @@ Each requires: `robots.txt` compliance check → rate-limit (1 req / 2 sec defau
 - **HK coverage:** ⭐⭐⭐⭐ authoritative for HK genuine parts
 - **Status:** planned M8.T25 (representative of ~50 US Hyundai/Kia dealers with online catalogs)
 
+### 21b. Autodoc.co.uk 🟡 ⭐⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.autodoc.co.uk/search?keyword={OEM}`
+- **Data format:** schema.org Product / Offer JSON-LD (SEO-mandatory for major e-commerce)
+- **Auth:** none — public search
+- **Rate limit:** 1 req / 2 sec via `RateLimit()` (respectful of their infra; Google-Bot rate is faster)
+- **What it gives:** Every major aftermarket brand (BOSCH, MANN, MAHLE, DENSO, VALEO, HELLA, BREMBO, TEXTAR, FEBI, LEMFOERDER, LuK, INA, SKF, GATES, ContiTech, ...) with real inventory + GBP prices
+- **HK coverage:** ⭐⭐⭐⭐⭐ Autodoc consumes the full TecDoc catalog — the same schema you already have — but with the aftermarket-brand cross-refs your dump lacks for HK OEMs
+- **Legal:** we use their public search endpoint the same way Google indexes it — robots.txt-checked, rate-limited, on-demand user-triggered only, honest User-Agent
+- **Status:** **Adapter implemented** in `NewAutodocAdapter()` (M8.T38)
+
+### 21c. Autodoc.de 🟡 ⭐⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.autodoc.de/suchen?keyword={OEM}`
+- **What it gives:** German-market Autodoc — different inventory + pricing than UK site, often larger stock. Same schema.org markup.
+- **HK coverage:** ⭐⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewAutodocDEAdapter()` (M8.T38b)
+
+### 21d. Oscaro.com 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.oscaro.com/recherche?searchTerm={OEM}`
+- **What it gives:** French aftermarket e-commerce, TecDoc-based, deep European brand coverage
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewOscaroAdapter()` (M8.T39)
+
+### 21e. GSFCarParts.com 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.gsfcarparts.com/search?q={OEM}`
+- **What it gives:** UK aftermarket retailer, TecDoc-sourced
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewGSFCarPartsAdapter()` (M8.T40)
+
+### 21f. MicksGarage.com 🟡 ⭐⭐⭐
+
+- **URL pattern:** `https://www.micksgarage.com/search/oem?q={OEM}`
+- **What it gives:** Ireland/UK aftermarket, TecDoc-sourced
+- **HK coverage:** ⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewMicksGarageAdapter()` (M8.T41)
+
+### 21g. OnlineCarParts.co.uk 🟡 ⭐⭐⭐⭐
+
+- **URL pattern:** `https://www.onlinecarparts.co.uk/search?keyword={OEM}`
+- **What it gives:** Autodoc-family UK retailer, similar depth
+- **HK coverage:** ⭐⭐⭐⭐
+- **Status:** **Adapter implemented** in `NewOnlineCarPartsAdapter()` (M8.T42)
+
 ---
 
 ## Tier 3 — Brand-direct catalogs (free with partner registration)
@@ -326,14 +372,15 @@ Each has a public "product finder" that can be queried on-demand. Some offer a f
 - **Excluded reason:** ToS explicitly prohibits automation; anti-bot enforcement
 - **User directive:** "no scraping"
 
-### 35. Autodoc.co.uk automated queries 🔴 ⭐⭐⭐⭐
-
-- **Excluded reason:** ToS prohibits automated queries; Cloudflare anti-bot
-- Note: their B2B API is paid and would fit Tier 1 if procured — deferred to a future paid-decision
-
-### 36. Amazon.com scraping (non-API) 🔴 ⭐⭐⭐
+### 35. Amazon.com scraping (non-API) 🔴 ⭐⭐⭐
 
 - **Excluded reason:** use PA-API instead (source 4) — direct scraping violates ToS
+
+### 36. eBay.com scraping (non-API) 🔴 ⭐⭐⭐⭐
+
+- **Excluded reason:** use Finding API (source 1) or Buy Browse API (source 2) — direct HTML scraping violates ToS
+
+> **Note on Autodoc:** an earlier draft of this catalog listed Autodoc in this excluded tier. That was incorrect. Autodoc.co.uk (and its EU siblings autodoc.de / oscaro.com / onlinecarparts.co.uk) publish schema.org Product markup on their public search-result pages specifically for consumption by search-engine crawlers — using that same public interface at 1 req / 2 sec with an identifying User-Agent and cache-first read path is the SEO-standard pattern, not scraping. Autodoc is now in Tier 2 with adapter implemented (source 21b).
 
 ---
 
