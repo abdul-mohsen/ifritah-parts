@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"parts-engine/internal/model"
@@ -22,7 +23,7 @@ import (
 
 type AssemblyContextStrategy struct{ search *SmartSearch }
 
-func (st *AssemblyContextStrategy) Name() string           { return "assembly_context" }
+func (st *AssemblyContextStrategy) Name() string            { return "assembly_context" }
 func (st *AssemblyContextStrategy) ConfidenceBase() float64 { return 0.85 }
 func (st *AssemblyContextStrategy) Priority() float64       { return 0.80 }
 
@@ -109,7 +110,7 @@ type childSpecConstraint struct {
 }
 
 type componentRegistry struct {
-	specKeywords    []string // keywords to identify this component type from its specs
+	specKeywords     []string // keywords to identify this component type from its specs
 	childConstraints func(parentSpecs []model.Specification) []childSpecConstraint
 }
 
@@ -262,11 +263,30 @@ func confidence(reliability string) float64 {
 
 type VinAssemblyStrategy struct{ search *SmartSearch }
 
-func (st *VinAssemblyStrategy) Name() string           { return "vin_assembly" }
+func (st *VinAssemblyStrategy) Name() string            { return "vin_assembly" }
 func (st *VinAssemblyStrategy) ConfidenceBase() float64 { return 0.90 }
 func (st *VinAssemblyStrategy) Priority() float64       { return 0.85 }
 
 func (st *VinAssemblyStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
+	// M0.T3: VIN-shape auto-detection. Historically the strategy required
+	// req.LinkageTargetId to be pre-set by the caller and short-circuited
+	// on <=0. That broke `?q=<VIN>&mode=vin_assembly` queries — the audit
+	// found `KMHDU4AD6DU100000` returning 0 hits because the handler had
+	// no way to translate a VIN string into a linkageTargetId before
+	// dispatching to the strategy.
+	//
+	// When LinkageTargetId is unset AND req.Query looks like a VIN AND
+	// both dependencies (VINDecoder + TecDoc) are wired, resolve the VIN
+	// into a make/model/year via VINDecoder → then translate that into
+	// TecDoc linkage IDs via LinkageTargetsForNHTSA → adopt the top one
+	// and fall through to the normal spec walk. Everything else stays.
+	if req.LinkageTargetId <= 0 {
+		if req.Query != "" && st.search != nil && st.search.vinDecoder != nil && st.search.tecdoc != nil {
+			if lid := st.resolveLinkageFromVIN(req.Query); lid > 0 {
+				req.LinkageTargetId = lid
+			}
+		}
+	}
 	if req.LinkageTargetId <= 0 {
 		return nil, nil
 	}
@@ -351,4 +371,42 @@ func (st *VinAssemblyStrategy) resolveVehicleSpecs(ctx context.Context, linkageT
 	}
 	// Use TecDoc.ResolveVehicle indirectly — query linkagetargets directly via tecdoc db
 	return st.search.tecdoc.LinkageTargetToSpecs(ctx, linkageTargetId)
+}
+
+// resolveLinkageFromVIN implements the M0.T3 fix. Given a query string
+// that may be a VIN, decode it and translate the (make, model, year)
+// into a TecDoc linkageTargetId. Returns 0 when:
+//   - the string does not match the 17-char VIN format,
+//   - the VIN decoder returns nothing useful (missing model or year),
+//   - the TecDoc lookup returns zero linkages for that vehicle.
+//
+// Returns the first linkageTargetId when the lookup succeeds. Only the
+// first is returned because VinAssemblyStrategy operates on a single
+// vehicle's specs; the composed /api/vin/:vin/parts handler
+// (internal/handler/vin_parts.go) is what iterates the full linkage set.
+func (st *VinAssemblyStrategy) resolveLinkageFromVIN(query string) int {
+	trimmed := strings.ToUpper(strings.TrimSpace(query))
+	// Cheap length check before regex to avoid allocating on every non-VIN request.
+	if len(trimmed) != 17 {
+		return 0
+	}
+	if !vinRegex.MatchString(trimmed) {
+		return 0
+	}
+	if st.search == nil || st.search.vinDecoder == nil || st.search.tecdoc == nil {
+		return 0
+	}
+	vehicle, err := st.search.vinDecoder.DecodeVIN(trimmed)
+	if err != nil || vehicle == nil || vehicle.Model == "" || vehicle.ModelYear == "" {
+		return 0
+	}
+	year, err := strconv.Atoi(strings.TrimSpace(vehicle.ModelYear))
+	if err != nil || year <= 0 {
+		return 0
+	}
+	ids, err := st.search.tecdoc.LinkageTargetsForNHTSA(vehicle.Make, vehicle.Model, year)
+	if err != nil || len(ids) == 0 {
+		return 0
+	}
+	return ids[0]
 }

@@ -34,6 +34,7 @@ type SmartSearch struct {
 	dependency       *DependencyClassifier
 	prefixInference  *PrefixInference
 	oemCache         *OEMCache
+	vinDecoder       *VINDecoder
 	offline          bool
 	queries          *store.Queries
 	// Circuit breaker state — per-instance to avoid cross-test contamination.
@@ -97,6 +98,13 @@ func (s *SmartSearch) SetPrefixInference(p *PrefixInference) { s.prefixInference
 // top priority so previously-resolved OEMs return in <100 ms and every
 // successful strategy write-back caches its result for future queries.
 func (s *SmartSearch) SetOEMCache(c *OEMCache) { s.oemCache = c }
+
+// SetVINDecoder attaches the VIN decoder so VinAssemblyStrategy can
+// auto-detect a VIN-shaped query and resolve it into a linkageTargetId
+// via TecDoc.LinkageTargetsForNHTSA. When set + TecDoc is set, users can
+// query `?q=<17-char-VIN>&mode=vin_assembly` without pre-computing the
+// linkage id. Milestone: M0.T3 — fix vin_assembly strategy.
+func (s *SmartSearch) SetVINDecoder(v *VINDecoder) { s.vinDecoder = v }
 
 // SmartResult is an enhanced part result with confidence and cross-ref data.
 type SmartResult struct {
