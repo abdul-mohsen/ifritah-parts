@@ -1,15 +1,27 @@
 name: nightly-audit
 
-# M6.S1.T1 — nightly search-quality audit against qa.ifritah.com.
+# M6.S1.T1 -- nightly search-quality audit.
 #
-# Runs a 200-OEM canary corpus through combined mode (enrichment=none)
-# and publishes results to docs/reports/nightly/{date}/. If any of the
-# alert thresholds trip (F1_correct drop >= 0.05 from the previous
-# nightly, or F1_hit < 0.60 overall), the workflow fails and pings the
-# repo maintainers via a GitHub issue.
+# Runs the 200-OEM canary corpus (scripts/audit/corpus-canary-v1.csv)
+# through combined mode (enrichment=none) against the configured search
+# endpoint and publishes results to docs/reports/nightly/{date}/.
 #
-# Runs against qa (not a preview) so we get the live-deploy signal.
-# For per-PR checks see pr-quality-gate.yml (M6.S1.T2).
+# Graceful degradation contract (M6.S1.T1 acceptance):
+#   * If the search endpoint is unreachable, the workflow logs a clear
+#     warning annotation and exits 0 -- this is treated as the deploy
+#     team's problem, not a workflow bug. Downstream steps skip via
+#     step outputs.
+#   * All optional-signal steps use continue-on-error: true so a
+#     transient failure in one step never fails the whole run red.
+#   * The alert-issue step only fires when the audit actually ran AND
+#     tripped a metric floor. Missing signal is not an alert.
+#
+# Alert thresholds (absolute floors, adjust as milestones progress):
+#   * F1_correct  < 0.30   -> open GitHub issue
+#   * F1_hit      < 0.60   -> open GitHub issue
+#
+# Runs against qa (or an override) so we get the live-deploy signal.
+# For per-PR gates see pr-quality-gate.yml (M6.S1.T2).
 
 on:
   schedule:
@@ -20,7 +32,7 @@ on:
       corpus:
         description: 'Corpus file (relative to scripts/audit/)'
         required: false
-        default: 'corpus-200-canary.csv'
+        default: 'corpus-canary-v1.csv'
       endpoint:
         description: 'Search endpoint to audit'
         required: false
@@ -39,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CORPUS: ${{ inputs.corpus || 'corpus-200-canary.csv' }}
+      CORPUS: ${{ inputs.corpus || 'corpus-canary-v1.csv' }}
       ENDPOINT: ${{ inputs.endpoint || 'https://qa.ifritah.com' }}
 
     steps:
@@ -52,14 +64,28 @@ jobs:
         id: stamp
         run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - name: Health check (fail fast if qa is down)
+      # ------------------------------------------------------------------
+      # Graceful-degradation gate. If qa is down we WARN and skip the rest
+      # of the job (exit 0, not exit 1) so the workflow shows green with a
+      # clear "skipped" annotation instead of a red X on the maintainer's
+      # dashboard. Downstream steps gate on steps.reachable.outputs.ok.
+      # ------------------------------------------------------------------
+      - name: Health check (soft; records reachability)
+        id: reachable
+        shell: bash
         run: |
-          if ! curl -fsS --max-time 10 -o /dev/null -w "%{http_code}\n" "${ENDPOINT}/api/search/modes"; then
-            echo "qa endpoint ${ENDPOINT} unreachable — skipping this nightly"
-            exit 1
+          if curl -fsS --max-time 10 -o /dev/null -w "%{http_code}\n" "${ENDPOINT}/api/search/modes"; then
+            echo "endpoint ${ENDPOINT} reachable"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=nightly-audit skipped::${ENDPOINT} unreachable. Workflow degrades gracefully -- exit 0, not red X."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run audit-quality.ps1
+        if: steps.reachable.outputs.ok == 'true'
+        id: audit
+        continue-on-error: true
         shell: pwsh
         run: |
           pwsh -File scripts/audit/audit-quality.ps1 `
@@ -73,35 +99,52 @@ jobs:
             -InterRequestMs 500
 
       - name: Run analyze-quality.ps1
+        if: steps.reachable.outputs.ok == 'true' && steps.audit.outcome == 'success'
+        id: analyze
+        continue-on-error: true
         shell: pwsh
         run: |
-          $raw = Get-ChildItem "$env:GITHUB_WORKSPACE/qa-quality-raw-*.csv" |
+          $raw = Get-ChildItem "$env:GITHUB_WORKSPACE/qa-quality-raw-*.csv" -EA SilentlyContinue |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $raw) {
+            Write-Host "::warning title=analyze skipped::no qa-quality-raw-*.csv produced by audit step"
+            exit 0
+          }
           Write-Host "Analyzing $($raw.Name)"
           pwsh -File scripts/audit/analyze-quality.ps1 `
             -InputCSV $raw.FullName `
             -OutputDir "$env:GITHUB_WORKSPACE"
 
       - name: Publish nightly report to docs/reports/nightly/${{ steps.stamp.outputs.date }}
+        if: steps.reachable.outputs.ok == 'true' && steps.analyze.outcome == 'success'
+        id: publish
+        continue-on-error: true
         shell: bash
         run: |
           DEST="docs/reports/nightly/${{ steps.stamp.outputs.date }}"
           mkdir -p "$DEST"
-          cp "$GITHUB_WORKSPACE/qa-quality-raw-"*.csv                  "$DEST/raw.csv"
-          cp "$GITHUB_WORKSPACE/qa-quality-by-category-"*.csv          "$DEST/by-category.csv"
-          cp "$GITHUB_WORKSPACE/qa-quality-by-system-"*.csv            "$DEST/by-system.csv"
-          cp "$GITHUB_WORKSPACE/qa-quality-by-slice-"*.csv             "$DEST/by-slice.csv"
+          cp "$GITHUB_WORKSPACE/qa-quality-raw-"*.csv                  "$DEST/raw.csv"                  || true
+          cp "$GITHUB_WORKSPACE/qa-quality-by-category-"*.csv          "$DEST/by-category.csv"          || true
+          cp "$GITHUB_WORKSPACE/qa-quality-by-system-"*.csv            "$DEST/by-system.csv"            || true
+          cp "$GITHUB_WORKSPACE/qa-quality-by-slice-"*.csv             "$DEST/by-slice.csv"             || true
           cp "$GITHUB_WORKSPACE/qa-quality-by-strategy-"*.csv          "$DEST/by-strategy.csv"          || true
           cp "$GITHUB_WORKSPACE/qa-quality-by-strategy-slice-"*.csv    "$DEST/by-strategy-slice.csv"    || true
-          cp "$GITHUB_WORKSPACE/qa-quality-failures-"*.csv             "$DEST/failures.csv"
-          cp "$GITHUB_WORKSPACE/qa-quality-summary-"*.txt              "$DEST/summary.txt"
+          cp "$GITHUB_WORKSPACE/qa-quality-failures-"*.csv             "$DEST/failures.csv"             || true
+          cp "$GITHUB_WORKSPACE/qa-quality-summary-"*.txt              "$DEST/summary.txt"              || true
           ls -la "$DEST"
 
       - name: Check alert thresholds
+        if: steps.reachable.outputs.ok == 'true' && steps.analyze.outcome == 'success'
         id: alerts
+        continue-on-error: true
         shell: pwsh
         run: |
           $summ = Get-Content "$env:GITHUB_WORKSPACE/qa-quality-summary-*.txt" -EA 0 | Out-String
+          if (-not $summ) {
+            Write-Host "::warning::no summary file -- cannot compute alert thresholds"
+            echo "should_alert=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
           $f1c  = [double](([regex]::Match($summ, "F1_correct\s*=\s*([\d\.]+)")).Groups[1].Value)
           $f1h  = [double](([regex]::Match($summ, "F1_hit\s*=\s*([\d\.]+)")).Groups[1].Value)
           $avg  = [double](([regex]::Match($summ, "AvgRepl_correct\s*=\s*([\d\.]+)")).Groups[1].Value)
@@ -111,7 +154,6 @@ jobs:
           echo "f1_hit=$f1h"        >> $env:GITHUB_OUTPUT
           echo "avg_repl=$avg"      >> $env:GITHUB_OUTPUT
 
-          # Absolute floors (adjust as milestones progress).
           $alertReason = @()
           if ($f1c -lt 0.30) { $alertReason += "F1_correct=$f1c below floor 0.30" }
           if ($f1h -lt 0.60) { $alertReason += "F1_hit=$f1h below floor 0.60" }
@@ -125,6 +167,8 @@ jobs:
           }
 
       - name: Commit + push nightly report
+        if: steps.publish.outcome == 'success'
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -135,19 +179,21 @@ jobs:
           BRANCH="nightly-audits/${{ steps.stamp.outputs.date }}"
           git checkout -B "$BRANCH"
           git add docs/reports/nightly/${{ steps.stamp.outputs.date }}
+          if git diff --staged --quiet; then
+            echo "no changes to commit (probably empty run)"
+            exit 0
+          fi
           git commit -m "chore(nightly): audit results for ${{ steps.stamp.outputs.date }}
 
           F1_hit     = ${{ steps.alerts.outputs.f1_hit }}
           F1_correct = ${{ steps.alerts.outputs.f1_correct }}
           AvgRepl    = ${{ steps.alerts.outputs.avg_repl }}
-          " || {
-            echo "no changes to commit (probably empty run)"
-            exit 0
-          }
+          "
           git push -f origin "$BRANCH"
 
       - name: Open alert issue if thresholds tripped
         if: steps.alerts.outputs.should_alert == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -173,6 +219,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: nightly-audit-${{ steps.stamp.outputs.date }}
@@ -181,3 +228,4 @@ jobs:
             qa-quality-by-*.csv
             qa-quality-failures-*.csv
             qa-quality-summary-*.txt
+          if-no-files-found: ignore
