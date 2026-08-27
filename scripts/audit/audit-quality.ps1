@@ -1,13 +1,39 @@
 # audit-quality.ps1 - Search quality audit runner
 #
-# Reads an input corpus CSV, hits qa.ifritah.com per OEM with enrichmentLevel=full
+# Reads an input corpus CSV, hits qa.ifritah.com per query with enrichmentLevel=full
 # so we capture aftermarket alternatives, OEM cross-refs, specs, vehicles, and
 # supersession alongside the primary result. Emits ONE dated raw CSV.
 #
 # Analyze with analyze-quality.ps1 to get per-category / per-slice F1 tables.
 #
-# Corpus columns required: OEM, Slice, GroundTruth, ExpectedCategory, GoodTokens
-# Optional: ExpectedSystem, ExpectedMake, Chassis, Prefix5
+# Two corpus shapes are supported:
+#
+#   OEM corpus (default):
+#     Columns required: OEM, Slice, GroundTruth, ExpectedCategory, GoodTokens
+#     Optional: ExpectedSystem, ExpectedMake, Chassis, Prefix5
+#     Run with defaults (no -QueryColumn override).
+#
+#   Keyword corpus (M0.T5, for keyword_gated strategy):
+#     Columns required: Query, ExpectedCategory, GoodTokens
+#     Run with: -InputCorpus scripts/audit/corpus-keywords-v1.csv -QueryColumn Query -Modes keyword_gated
+#
+# Parameters:
+#   -InputCorpus     Path to the corpus CSV.
+#   -OutputDir       Where the dated raw CSV + log are written.
+#   -Endpoint        Base URL (default https://qa.ifritah.com).
+#   -Mode            Single mode. Ignored when -Modes is set.
+#   -Modes           One or more strategy modes to run (comma-joined string or array).
+#                    Example: -Modes keyword_gated  or  -Modes "cache,legacy,combined".
+#                    Every corpus row is fanned out across every mode.
+#   -EnrichmentLevel enrichmentLevel query param passed to /api/search (default "full").
+#   -ThrottleLimit   Max parallel workers.
+#   -MaxTimeoutS     Per-request curl timeout.
+#   -InterRequestMs  Post-request sleep per worker (jitter for the API).
+#   -MaxRetries      429 retry ceiling.
+#   -QueryColumn     Which corpus column provides the `q=` value (default "OEM").
+#                    Set to "Query" when running against a keyword corpus.
+#   -DryRun          Resolve and print URLs then exit; no API calls, no output CSV.
+#                    Use this to sanity-check invocations quickly.
 
 param(
   [string]$InputCorpus    = "C:\Users\ALMAAB~1\AppData\Local\Temp\opencode\corpus-1500-v2.csv",
@@ -19,7 +45,9 @@ param(
   [int]$ThrottleLimit     = 4,
   [int]$MaxTimeoutS       = 25,
   [int]$InterRequestMs    = 750,
-  [int]$MaxRetries        = 5
+  [int]$MaxRetries        = 5,
+  [string]$QueryColumn    = "OEM",
+  [switch]$DryRun
 )
 
 Add-Type -AssemblyName System.Web
@@ -52,17 +80,62 @@ $dateStamp = Get-Date -Format "yyyy-MM-dd_HHmm"
 $outputFile = Join-Path $OutputDir "qa-quality-raw-$dateStamp.csv"
 $logFile    = Join-Path $OutputDir "qa-quality-raw-$dateStamp.log"
 
-$corpus = Import-Csv $InputCorpus
+# UTF-8 so keyword corpora with Arabic transliterations round-trip cleanly.
+$corpus = Import-Csv $InputCorpus -Encoding utf8
 $totalOems = $corpus.Count
 $totalReq  = $totalOems * $modesToRun.Count
-Write-Host "Corpus:     $InputCorpus ($totalOems OEMs)"
-Write-Host "Endpoint:   $Endpoint"
-Write-Host "Modes:      $($modesToRun -join ', ') ($($modesToRun.Count) modes -> $totalReq requests)"
-Write-Host "Enrichment: $EnrichmentLevel"
-Write-Host "Workers:    $ThrottleLimit (throttle+delay tuned for full enrichment)"
-Write-Host "Timeout:    ${MaxTimeoutS}s"
-Write-Host "Output:     $outputFile"
+
+# Small helper: pull the query value from whichever column -QueryColumn names.
+# Returns "" when the column is missing so callers can skip cleanly.
+function Get-QueryValue($row, [string]$col) {
+  if ($row.PSObject.Properties.Match($col).Count -gt 0) {
+    return [string]$row.PSObject.Properties[$col].Value
+  }
+  return ""
+}
+
+Write-Host "Corpus:      $InputCorpus ($totalOems rows)"
+Write-Host "QueryColumn: $QueryColumn"
+Write-Host "Endpoint:    $Endpoint"
+Write-Host "Modes:       $($modesToRun -join ', ') ($($modesToRun.Count) modes -> $totalReq requests)"
+Write-Host "Enrichment:  $EnrichmentLevel"
+Write-Host "Workers:     $ThrottleLimit (throttle+delay tuned for full enrichment)"
+Write-Host "Timeout:     ${MaxTimeoutS}s"
+Write-Host "Output:      $outputFile"
 Write-Host ""
+
+# Fail loud if the requested QueryColumn isn't present on the corpus. Better
+# to bail here than emit 200 rows of blank q= URLs.
+$firstRow = $corpus | Select-Object -First 1
+if ($firstRow -and $firstRow.PSObject.Properties.Match($QueryColumn).Count -eq 0) {
+  $cols = ($firstRow.PSObject.Properties | ForEach-Object { $_.Name }) -join ", "
+  Write-Error "Column '$QueryColumn' not found in corpus. Available columns: $cols"
+  exit 1
+}
+
+# -DryRun: resolve every (row x mode) into a URL and print. No API calls, no
+# worker files, no output CSV. Meant to sanity-check invocations quickly.
+if ($DryRun) {
+  Write-Host "DRY RUN - resolving URLs (no API calls will be made)"
+  Write-Host ""
+  $shown = 0
+  foreach ($row in $corpus) {
+    $queryVal = Get-QueryValue $row $QueryColumn
+    if (-not $queryVal) {
+      Write-Host "SKIP row (empty '$QueryColumn'): $row"
+      continue
+    }
+    $encoded = [System.Web.HttpUtility]::UrlEncode($queryVal)
+    foreach ($m in $modesToRun) {
+      Write-Host "  $Endpoint/api/search?q=$encoded&mode=$m&enrichmentLevel=$EnrichmentLevel"
+      $shown++
+    }
+  }
+  Write-Host ""
+  Write-Host "DRY RUN complete: $shown URL(s) resolved across $($corpus.Count) row(s) x $($modesToRun.Count) mode(s)."
+  exit 0
+}
+
 
 $workerDir = Join-Path $env:TEMP "qa-quality-workers-$(Get-Random)"
 New-Item -ItemType Directory -Path $workerDir -Force | Out-Null
@@ -97,12 +170,18 @@ $requests | ForEach-Object -Parallel {
   $counter   = $using:counter
   $totalReq  = $using:totalReq
   $workerDir = $using:workerDir
+  $queryCol  = $using:QueryColumn
 
   Add-Type -AssemblyName System.Web -EA SilentlyContinue
   $threadId = [System.Threading.Thread]::CurrentThread.ManagedThreadId
   $workerFile = Join-Path $workerDir "worker-$threadId.csv"
 
-  $encoded = [System.Web.HttpUtility]::UrlEncode($row.OEM)
+  # Pull the query value from whichever column -QueryColumn names. The corpus
+  # was validated up front so the property exists; still guard for empty cells.
+  $queryVal = if ($row.PSObject.Properties.Match($queryCol).Count -gt 0) {
+    [string]$row.PSObject.Properties[$queryCol].Value
+  } else { "" }
+  $encoded = [System.Web.HttpUtility]::UrlEncode($queryVal)
   $url = "$endpoint/api/search?q=$encoded&mode=$mode&enrichmentLevel=$enrichLvl"
 
   $status = 0
@@ -214,7 +293,7 @@ $requests | ForEach-Object -Parallel {
   $prefix5  = if ($row.PSObject.Properties.Match('Prefix5').Count -gt 0)          { $row.Prefix5 }          else { "" }
 
   $fields = @(
-    (CsvEsc $row.OEM),
+    (CsvEsc $queryVal),
     (CsvEsc $row.Slice),
     (CsvEsc $row.GroundTruth),
     (CsvEsc $expSys),
