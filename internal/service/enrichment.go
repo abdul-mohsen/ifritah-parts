@@ -375,11 +375,12 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			articleId := enriched.LegacyArticleId
 			oem := enriched.Part.ArticleNumber
 
+			// M6.S2.T2: per-request cost meter (nil-safe).
+			meter := CostMeterFromContext(ctx)
 			if articleId == 0 && oem != "" && budgetLeft() {
 				bestID, refs, err := promoteArticleIds(ctx, promoter, oem, promotionLayerLimit)
+				meter.RecordDBQuery(0)
 				if err != nil && !errors.Is(err, errNoPromotion) {
-					// ctx.Err() or some non-sentinel error. Not fatal —
-					// aftermarket path below still runs on the raw OEM.
 					log.Printf("[enrichResults] promoteArticleIds oem=%q err=%v", oem, err)
 				}
 				if bestID > 0 {
@@ -393,8 +394,13 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			// Aftermarket alternatives — works for BOTH articleId paths
 			// AND OEM-string-only paths because FindAftermarketForOEM
 			// queries by OEM string, not by articleId. Always run.
+			//
+			// M6.S2.T2: use the ctx-aware variant so each of the 3-4
+			// internal paths (articlecrosses / oem_number /
+			// oem_search_index / optional online dispatcher) can
+			// Record*() into the request's cost meter.
 			if s.tecdoc != nil && oem != "" && budgetLeft() {
-				if amParts, err := s.tecdoc.FindAftermarketForOEM(oem); err == nil {
+				if amParts, err := s.tecdoc.FindAftermarketForOEMCtx(ctx, oem); err == nil {
 					existing := make(map[string]bool, len(enriched.AftermarketAlternatives))
 					for _, p := range enriched.AftermarketAlternatives {
 						existing[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
@@ -428,6 +434,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				} else {
 					log.Printf("[enrichResults] specs id=%d err=%v", articleId, err)
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Always: compatible vehicles
@@ -441,6 +448,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 					}
 					enriched.Compatibility = strs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			if level != "full" {
@@ -452,6 +460,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if docs, err := s.tecDocDocs.FindDocuments(articleId); err == nil {
 					enriched.Documents = docs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: supersession chain (superseded / successor OEMs).
@@ -522,7 +531,10 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 							if !budgetLeft() {
 								break
 							}
-							amParts, aerr := s.tecdoc.FindAftermarketForOEM(chainOEM)
+							// M6.S2.T2: use ctx-aware variant so
+							// per-path DB queries record into the
+							// request meter.
+							amParts, aerr := s.tecdoc.FindAftermarketForOEMCtx(ctx, chainOEM)
 							if aerr != nil {
 								continue
 							}
@@ -537,6 +549,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 						}
 					}
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: functional equivalents (same-fit alternatives)
@@ -544,6 +557,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if feq, err := s.tecDocFunctional.FindFunctionalEquivalents(articleId, 0, 20); err == nil {
 					enriched.FunctionalEquivalents = feq
 				}
+				meter.RecordDBQuery(0)
 			}
 		}(i, orig)
 	}
@@ -594,6 +608,9 @@ collectLoop:
 			}
 		}
 		if len(articleIds) > 0 {
+			// M6.S2.T2: single batch query records as one DB event on
+			// the request meter.
+			CostMeterFromContext(ctx).RecordDBQuery(0)
 			specsById, err := s.tecDocSpecs.FindSpecificationsBatch(articleIds)
 			if err != nil {
 				log.Printf("[enrichResults] batch specs err=%v (falling back to skip specs)", err)

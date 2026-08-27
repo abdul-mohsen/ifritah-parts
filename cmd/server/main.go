@@ -364,6 +364,13 @@ func main() {
 			log.Printf("✓ Debug log stream active at GET /api/debug/logs")
 		}
 
+		// /api/debug/cost — M6.S2.T2 per-request cost aggregate.
+		// Always on: aggregate-only (no PII), used by Grafana / manual
+		// health checks / p95-cost alerting. Snapshot is O(1) atomic reads
+		// from service.DefaultAggregate.
+		costH := handler.NewCostHandler()
+		api.GET("/debug/cost", costH.Aggregate)
+
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)
 		api.GET("/catalog/groups", catalogH.Groups)
