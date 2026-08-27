@@ -23,6 +23,13 @@ type stubVehicleFitmentRepo struct {
 	fbLastId    int
 	fbLastLimit int
 	fbCallCount int
+
+	// Batch path (M3.S1.T2)
+	batchRows      map[int][]compatibleVehicleRow
+	batchErr       error
+	batchLastIds   []int
+	batchLastLimit int
+	batchCallCount int
 }
 
 func (s *stubVehicleFitmentRepo) QueryCompatibleVehicles(_ context.Context, legacyArticleId, limit int) ([]compatibleVehicleRow, error) {
@@ -43,6 +50,16 @@ func (s *stubVehicleFitmentRepo) QueryCompatibleVehiclesFallback(_ context.Conte
 		return nil, s.fbErr
 	}
 	return s.fbRows, nil
+}
+
+func (s *stubVehicleFitmentRepo) QueryCompatibleVehiclesBatch(_ context.Context, legacyArticleIds []int, limitPerId int) (map[int][]compatibleVehicleRow, error) {
+	s.batchCallCount++
+	s.batchLastIds = append([]int(nil), legacyArticleIds...)
+	s.batchLastLimit = limitPerId
+	if s.batchErr != nil {
+		return nil, s.batchErr
+	}
+	return s.batchRows, nil
 }
 
 func TestTecDocVehicleFindCompatibleVehicles(t *testing.T) {
@@ -441,5 +458,98 @@ func TestTecDocVehicleFallback_DedupAndFieldMapping(t *testing.T) {
 	}
 	if vs[1].LinkageTargetId != 201 || vs[1].YearTo != 0 {
 		t.Errorf("expected ELANTRA row second with open-ended year, got %+v", vs[1])
+	}
+}
+
+// TestTecDocVehicle_FindCompatibleVehiclesBatch — M3.S1.T2 batch API.
+func TestTecDocVehicle_FindCompatibleVehiclesBatch(t *testing.T) {
+	repo := &stubVehicleFitmentRepo{
+		batchRows: map[int][]compatibleVehicleRow{
+			100: {
+				{
+					LinkageTargetId: 5001,
+					VehicleName:     "HYUNDAI TUCSON (TL) 2.0 CRDi 4WD 136HP [08.2015-]",
+					Make:            "Hyundai",
+					Model:           "TUCSON",
+					BeginYearMonth:  201508,
+					EndYearMonth:    202012,
+					FuelType:        "Diesel",
+					CapacityCC:      1995,
+					HorsePower:      136,
+					CategoryHint:    "Oil filter",
+				},
+			},
+			200: {
+				{
+					LinkageTargetId: 5002,
+					VehicleName:     "KIA SPORTAGE IV (QL) 1.6 T-GDI 177HP [07.2018-]",
+					Make:            "Kia",
+					Model:           "SPORTAGE",
+					BeginYearMonth:  201807,
+					EndYearMonth:    0,
+					FuelType:        "Petrol",
+					CapacityCC:      1591,
+					HorsePower:      177,
+					CategoryHint:    "Oil filter",
+				},
+			},
+			// id 300 intentionally omitted — batch surfaces gaps naturally
+		},
+	}
+	svc := &TecDocVehicle{repo: repo}
+	byId, err := svc.FindCompatibleVehiclesBatch([]int{100, 200, 200, 0, -1, 300}, 20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.batchCallCount != 1 {
+		t.Fatalf("expected exactly one batch call, got %d", repo.batchCallCount)
+	}
+	// Dedup + zero-drop before hitting the repo
+	if got := repo.batchLastIds; len(got) != 3 || got[0] != 100 || got[1] != 200 || got[2] != 300 {
+		t.Fatalf("expected repo batch call with deduped ids [100,200,300], got %v", got)
+	}
+	if len(byId) != 2 {
+		t.Fatalf("expected 2 ids in map (100, 200), got %d: %v", len(byId), byId)
+	}
+	if len(byId[100]) != 1 || byId[100][0].Chassis != "TL" {
+		t.Errorf("id 100 vehicle: expected parsed Chassis=TL, got %+v", byId[100])
+	}
+	if len(byId[200]) != 1 || byId[200][0].Chassis != "QL" {
+		t.Errorf("id 200 vehicle: expected parsed Chassis=QL, got %+v", byId[200])
+	}
+	if _, ok := byId[300]; ok {
+		t.Errorf("id 300 must be absent from map (repo returned no rows)")
+	}
+}
+
+// TestTecDocVehicle_FindCompatibleVehiclesBatch_EmptyInput — nil / empty slice.
+func TestTecDocVehicle_FindCompatibleVehiclesBatch_EmptyInput(t *testing.T) {
+	repo := &stubVehicleFitmentRepo{}
+	svc := &TecDocVehicle{repo: repo}
+
+	byId, err := svc.FindCompatibleVehiclesBatch(nil, 20)
+	if err != nil || len(byId) != 0 {
+		t.Fatalf("nil input: expected empty map, got err=%v map=%v", err, byId)
+	}
+	if repo.batchCallCount != 0 {
+		t.Fatalf("repo should not be called for nil input, got batchCallCount=%d", repo.batchCallCount)
+	}
+
+	byId, err = svc.FindCompatibleVehiclesBatch([]int{0, -1}, 20)
+	if err != nil || len(byId) != 0 {
+		t.Fatalf("all-invalid input: expected empty map, got err=%v map=%v", err, byId)
+	}
+	if repo.batchCallCount != 0 {
+		t.Fatalf("repo should not be called when all ids are invalid, got batchCallCount=%d", repo.batchCallCount)
+	}
+}
+
+// TestTecDocVehicle_FindCompatibleVehiclesBatch_RepoError — repo err propagates.
+func TestTecDocVehicle_FindCompatibleVehiclesBatch_RepoError(t *testing.T) {
+	repo := &stubVehicleFitmentRepo{batchErr: errors.New("mysql conn lost")}
+	svc := &TecDocVehicle{repo: repo}
+	_, err := svc.FindCompatibleVehiclesBatch([]int{100}, 20)
+	if err == nil {
+		t.Fatalf("expected repo error to propagate, got nil")
 	}
 }

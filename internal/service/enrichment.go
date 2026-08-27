@@ -600,5 +600,47 @@ collectLoop:
 		}
 	}
 
+	// M3.S1.T2 (part B): post-collect batch enrichment for compatible
+	// vehicles. Collapses the per-result FindCompatibleVehicles goroutine
+	// call above into one IN-list DB round-trip when there are ≥ 2
+	// results with legacyArticleId > 0.
+	//
+	// Batch runs primary 4-way join only. When the batch returns nothing
+	// for a specific id, the per-result vehicle field is left as populated
+	// by the per-goroutine call above (which chains M3.S2.T1 2-way
+	// fallback). So the batch is a fast-path optimization — never a
+	// regression: an empty batch entry never overwrites a populated field.
+	if s.tecDocVehicle != nil && ctx.Err() == nil {
+		articleIds := make([]int, 0, len(out))
+		idToIdx := make(map[int][]int, len(out))
+		for i, r := range out {
+			id := r.LegacyArticleId
+			if id > 0 && len(out[i].CompatibleVehicles) == 0 {
+				articleIds = append(articleIds, id)
+				idToIdx[id] = append(idToIdx[id], i)
+			}
+		}
+		if len(articleIds) > 0 {
+			vehiclesById, err := s.tecDocVehicle.FindCompatibleVehiclesBatch(articleIds, 20)
+			if err != nil {
+				log.Printf("[enrichResults] batch vehicles err=%v (per-result fallback still in effect)", err)
+			} else {
+				for id, vehicles := range vehiclesById {
+					for _, idx := range idToIdx[id] {
+						if len(out[idx].CompatibleVehicles) == 0 {
+							out[idx].CompatibleVehicles = vehicles
+							// Legacy Compatibility []string for backward compat.
+							strs := make([]string, 0, len(vehicles))
+							for _, v := range vehicles {
+								strs = append(strs, v.VehicleName)
+							}
+							out[idx].Compatibility = strs
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return out
 }
