@@ -275,8 +275,16 @@ func main() {
 	relatedPartsH := handler.NewRelatedPartsHandler(relatedParts)
 	vinPartsH := handler.NewVINPartsHandler(vinDecoder, tecdoc)
 	feedbackH := handler.NewFeedbackHandler(feedback)
+	// Admin gate for /api/feedback/weekly + /api/feedback/disputed uses the
+	// same ADMIN_AUTH_TOKEN env var already consumed by CommunityContribHandler.
+	// Empty token = dev mode (no gate); set in prod so aggregate reports
+	// aren't world-readable.
+	adminTok := os.Getenv("ADMIN_AUTH_TOKEN")
+	if adminTok != "" {
+		feedbackH.SetAdminAuthToken(adminTok)
+	}
 	contribH := handler.NewCommunityContribHandler(communityContrib)
-	if adminTok := os.Getenv("ADMIN_AUTH_TOKEN"); adminTok != "" {
+	if adminTok != "" {
 		contribH.SetAdminAuthToken(adminTok)
 	}
 	semanticH := handler.NewSemanticSearchHandler(semanticSvc)
@@ -343,7 +351,15 @@ func main() {
 		api.GET("/part/:id/crossref", searchH.CrossRef)
 		api.GET("/part/:id/alternatives", partsH.Alternatives)
 		api.GET("/parts/related", relatedPartsH.Get)
-		api.POST("/search/feedback", feedbackH.Submit)
+		// M6.S2.T1 — privacy-preserving feedback API. Routes live under
+		// /api/feedback (no /search/ prefix). The Submit endpoint is
+		// public + rate-limited (60 rpm / IP, burst 10, enforced inside
+		// the handler); the two aggregate endpoints are admin-gated via
+		// ADMIN_AUTH_TOKEN. Frontend widget is delivered as a follow-up
+		// task; NO other route registers a feedback handler.
+		api.POST("/feedback", feedbackH.Submit)
+		api.GET("/feedback/weekly", feedbackH.Weekly)
+		api.GET("/feedback/disputed", feedbackH.Disputed)
 		api.POST("/aftermarket/contribute", contribH.Submit)
 		api.GET("/admin/moderation/pending", contribH.ListPending)
 		api.POST("/admin/moderation/:id/review", contribH.Review)
@@ -363,6 +379,13 @@ func main() {
 			api.GET("/debug/logs", debugH.LogStream)
 			log.Printf("✓ Debug log stream active at GET /api/debug/logs")
 		}
+
+		// /api/debug/cost — M6.S2.T2 per-request cost aggregate.
+		// Always on: aggregate-only (no PII), used by Grafana / manual
+		// health checks / p95-cost alerting. Snapshot is O(1) atomic reads
+		// from service.DefaultAggregate.
+		costH := handler.NewCostHandler()
+		api.GET("/debug/cost", costH.Aggregate)
 
 		api.GET("/catalog/models", catalogH.Models)
 		api.GET("/catalog/vehicles", catalogH.Vehicles)

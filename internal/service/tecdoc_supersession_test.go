@@ -188,25 +188,9 @@ func TestTecDocSupersessionSourceStamped(t *testing.T) {
 	}
 }
 
-// ─── SupersessionStrategy regression tests (M0.T2 fix) ───────────────────
-//
-// The pre-fix strategy promoted OEM → articleId via st.search.oem.Search
-// which hit the small Postgres oem_search_index cache and returned zero
-// hits for essentially every HK OEM (F1_correct = 0.00 across every
-// audited input).
-//
-// The fix mirrors PR #20's four-source article-id promotion cascade — see
-// docs/data-sources/supersession-diagnosis.md. These regression tests
-// prove the strategy now:
-//  1. resolves via the primary path and walks the chain
-//  2. falls back to cross-refs when the primary returns nothing
-//  3. falls back to oem_search_index (third-level) when the first two miss
-//  4. returns nil (no error) when every path misses
-//
-// Uses a synthetic stubArticleIdPromoter + the existing stubSupersessionRepo
-// so no live MySQL is required (per M0.T2 spec: "Use synthetic mocks if
-// you can't hit real MySQL — the test just needs to prove the code path
-// works end-to-end").
+// SupersessionStrategy M0.T2 regression tests — cover primary hit,
+// fallback to cross-refs, fallback to oem_search_index, all-miss.
+// Uses stubArticleIdPromoter + stubSupersessionRepo, no live MySQL.
 
 // stubArticleIdPromoter implements the articleIdPromoter interface for
 // strategy tests. Each source key (primary/crossref/oem_index/local) maps

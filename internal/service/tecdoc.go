@@ -206,24 +206,10 @@ func (t *TecDoc) SearchByOEMIndex(oemNumber string, limit int) ([]model.OEMRefer
 	return refs, nil
 }
 
-// FetchDataSupplierIds returns the dataSupplierId per legacyArticleId for
-// the requested article-id set, as a single batched IN-list query against
-// the `articles` table. Introduced by M3.S1.T1 to power the canonical-pick
-// tiebreak in the article-id promotion pipeline (see
-// docs/data-sources/article-id-promotion-diagnosis.md).
-//
-// Returned map only contains ids that resolved; missing ids (zero, negative,
-// or not present in `articles`) are silently dropped so the caller can treat
-// "missing" as "unknown supplier — score 0" without extra bookkeeping.
-//
-// dataSupplierId is the TecDoc supplier-registration id. Higher values are
-// suppliers who registered their catalog more recently — a rough proxy for
-// "canonical/current" when two articles compete for the same OEM. The
-// roadmap M3.S1.T1 calls this out explicitly as the tiebreak signal.
-//
-// Empty input returns (nil, nil). Fails loud on DB errors — the caller
-// tolerates missing tiebreak data (falls back to first-seen article id)
-// but should not silently ignore a real query failure.
+// FetchDataSupplierIds returns dataSupplierId per legacyArticleId (batched
+// IN-list against `articles`). Used as the canonical-pick tiebreak in the
+// promoteArticleIds pipeline — higher supplier id wins. Missing ids are
+// dropped from the returned map. Empty input → (nil, nil).
 func (t *TecDoc) FetchDataSupplierIds(articleIds []int) (map[int]int, error) {
 	if t.db == nil {
 		return nil, fmt.Errorf("database not connected")
@@ -510,13 +496,31 @@ func (t *TecDoc) FindReplacements(legacyArticleId int) ([]model.SupersessionLink
 // still return what they have. Online path has its own longer 8s
 // dispatcher budget internally, but the 3s ctx here caps overall wait.
 func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPart, error) {
+	return t.FindAftermarketForOEMCtx(context.Background(), oemNumber)
+}
+
+// FindAftermarketForOEMCtx is the ctx-aware variant of FindAftermarketForOEM.
+// The parent ctx propagates cancellation into the 3s per-call budget (so a
+// caller with a tighter deadline stops earlier) and lets M6.S2.T2's
+// CostMeter — retrieved from ctx — record each internal path's DB / external
+// event. Old callers that don't carry a meter pass context.Background()
+// via the compatibility wrapper above; the meter recording is a no-op then.
+func (t *TecDoc) FindAftermarketForOEMCtx(parent context.Context, oemNumber string) ([]model.AftermarketPart, error) {
 	clean := NormalizeOEM(oemNumber)
 	if clean == "" {
 		return nil, nil
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
+
+	// Meter is retrieved once and shared across the parallel path
+	// goroutines. Record* is atomic + nil-safe so no synchronization
+	// needed at the call sites below.
+	meter := CostMeterFromContext(parent)
 
 	type pathResult struct {
 		parts []model.AftermarketPart
@@ -527,14 +531,17 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 
 	go func() {
 		p, err := t.findAftermarketFromArticlecrosses(ctx, clean)
+		meter.RecordDBQuery(0)
 		resultCh <- pathResult{p, err, "articlecrosses"}
 	}()
 	go func() {
 		p, err := t.findAftermarketFromOemNumber(ctx, clean)
+		meter.RecordDBQuery(0)
 		resultCh <- pathResult{p, err, "oem_number"}
 	}()
 	go func() {
 		p, err := t.findAftermarketFromOemSearchIndex(ctx, clean)
+		meter.RecordDBQuery(0)
 		resultCh <- pathResult{p, err, "oem_search_index"}
 	}()
 	// Path 4 (M8): federated online-search dispatcher. Cache-first;
@@ -545,7 +552,12 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 	if t.online != nil {
 		pathCount = 4
 		go func() {
-			resultCh <- pathResult{t.online.Search(ctx, clean), nil, "online"}
+			p := t.online.Search(ctx, clean)
+			// M6.S2.T2: the online dispatcher is a genuine external
+			// call (eBay Motors / dealer scrapes / G5 sources) —
+			// count it against the external-call budget, not DB.
+			meter.RecordExternal(0)
+			resultCh <- pathResult{p, nil, "online"}
 		}()
 	}
 

@@ -115,36 +115,10 @@ func (p *smartSearchOEMPromoter) FetchDataSupplierIds(articleIds []int) (map[int
 	return p.tecdoc.FetchDataSupplierIds(articleIds)
 }
 
-// promoteArticleIds is the chained-fallback article-id promotion pipeline
-// (M3.S1.T1). Given an OEM string, consults three sources in order and
-// returns the canonical article id plus the deduplicated ref set of the
-// FIRST successful layer.
-//
-// Fast-path semantics: when layer 1 returns any refs, layers 2 and 3 are
-// NOT called. This is by design — see
-// docs/data-sources/article-id-promotion-diagnosis.md for the
-// fallthrough-vs-UNION trade-off analysis. The short version:
-//   - layer 1 (oem_number) is the highest-quality signal — trust it when
-//     it hits.
-//   - layer 3 (oem_search_index) is a subset of layer 1 in the happy path
-//     (SearchByOEM unions both internally), so calling it unconditionally
-//     would double-hit the same table.
-//   - the DoD is a promotion RATE lift, not maximum-candidate recall.
-//
-// The canonical pick applies INSIDE the winning layer: if layer 1 returns
-// five distinct article ids (Bosch / MANN / MAHLE / Denso / Valeo all
-// catalog the same Hyundai OEM), we pick the id whose row in `articles`
-// has the highest dataSupplierId (proxy for most-recently-cataloged, hence
-// most-authoritative). Single-candidate layers skip the DB round-trip.
-//
-// Returns (bestArticleId, deduplicatedRefs, nil) on success. Returns
-// (0, nil, errNoPromotion) when every source returned zero refs. Ctx
-// cancellation between layers surfaces as (0, nil, ctx.Err()).
-//
-// Errors from individual layer calls are LOGGED but not fatal — the
-// pipeline moves on to the next layer, matching the pre-M3 inline
-// behavior. This is a soft-fail design: a MySQL blip on articlecrosses
-// shouldn't kill enrichment when oem_search_index is still available.
+// promoteArticleIds walks oem_number → articlecrosses → oem_search_index
+// and returns the first non-empty layer's refs. Within the winning layer
+// the article id with the highest dataSupplierId wins. Errors per layer
+// are logged and fall through. All-empty → errNoPromotion.
 func promoteArticleIds(ctx context.Context, p oemPromoter, oem string, perLayerLimit int) (int, []model.OEMReference, error) {
 	if p == nil || oem == "" {
 		return 0, nil, errNoPromotion
@@ -375,11 +349,12 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			articleId := enriched.LegacyArticleId
 			oem := enriched.Part.ArticleNumber
 
+			// M6.S2.T2: per-request cost meter (nil-safe).
+			meter := CostMeterFromContext(ctx)
 			if articleId == 0 && oem != "" && budgetLeft() {
 				bestID, refs, err := promoteArticleIds(ctx, promoter, oem, promotionLayerLimit)
+				meter.RecordDBQuery(0)
 				if err != nil && !errors.Is(err, errNoPromotion) {
-					// ctx.Err() or some non-sentinel error. Not fatal —
-					// aftermarket path below still runs on the raw OEM.
 					log.Printf("[enrichResults] promoteArticleIds oem=%q err=%v", oem, err)
 				}
 				if bestID > 0 {
@@ -393,8 +368,13 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			// Aftermarket alternatives — works for BOTH articleId paths
 			// AND OEM-string-only paths because FindAftermarketForOEM
 			// queries by OEM string, not by articleId. Always run.
+			//
+			// M6.S2.T2: use the ctx-aware variant so each of the 3-4
+			// internal paths (articlecrosses / oem_number /
+			// oem_search_index / optional online dispatcher) can
+			// Record*() into the request's cost meter.
 			if s.tecdoc != nil && oem != "" && budgetLeft() {
-				if amParts, err := s.tecdoc.FindAftermarketForOEM(oem); err == nil {
+				if amParts, err := s.tecdoc.FindAftermarketForOEMCtx(ctx, oem); err == nil {
 					existing := make(map[string]bool, len(enriched.AftermarketAlternatives))
 					for _, p := range enriched.AftermarketAlternatives {
 						existing[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
@@ -428,6 +408,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				} else {
 					log.Printf("[enrichResults] specs id=%d err=%v", articleId, err)
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Always: compatible vehicles
@@ -441,6 +422,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 					}
 					enriched.Compatibility = strs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			if level != "full" {
@@ -452,6 +434,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if docs, err := s.tecDocDocs.FindDocuments(articleId); err == nil {
 					enriched.Documents = docs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: supersession chain (superseded / successor OEMs).
@@ -522,7 +505,10 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 							if !budgetLeft() {
 								break
 							}
-							amParts, aerr := s.tecdoc.FindAftermarketForOEM(chainOEM)
+							// M6.S2.T2: use ctx-aware variant so
+							// per-path DB queries record into the
+							// request meter.
+							amParts, aerr := s.tecdoc.FindAftermarketForOEMCtx(ctx, chainOEM)
 							if aerr != nil {
 								continue
 							}
@@ -537,6 +523,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 						}
 					}
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: functional equivalents (same-fit alternatives)
@@ -544,6 +531,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if feq, err := s.tecDocFunctional.FindFunctionalEquivalents(articleId, 0, 20); err == nil {
 					enriched.FunctionalEquivalents = feq
 				}
+				meter.RecordDBQuery(0)
 			}
 		}(i, orig)
 	}
@@ -594,6 +582,9 @@ collectLoop:
 			}
 		}
 		if len(articleIds) > 0 {
+			// M6.S2.T2: single batch query records as one DB event on
+			// the request meter.
+			CostMeterFromContext(ctx).RecordDBQuery(0)
 			specsById, err := s.tecDocSpecs.FindSpecificationsBatch(articleIds)
 			if err != nil {
 				log.Printf("[enrichResults] batch specs err=%v (falling back to skip specs)", err)
@@ -602,6 +593,48 @@ collectLoop:
 					for _, idx := range idToIdx[id] {
 						if len(out[idx].Specifications) == 0 {
 							out[idx].Specifications = specs
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// M3.S1.T2 (part B): post-collect batch enrichment for compatible
+	// vehicles. Collapses the per-result FindCompatibleVehicles goroutine
+	// call above into one IN-list DB round-trip when there are ≥ 2
+	// results with legacyArticleId > 0.
+	//
+	// Batch runs primary 4-way join only. When the batch returns nothing
+	// for a specific id, the per-result vehicle field is left as populated
+	// by the per-goroutine call above (which chains M3.S2.T1 2-way
+	// fallback). So the batch is a fast-path optimization — never a
+	// regression: an empty batch entry never overwrites a populated field.
+	if s.tecDocVehicle != nil && ctx.Err() == nil {
+		articleIds := make([]int, 0, len(out))
+		idToIdx := make(map[int][]int, len(out))
+		for i, r := range out {
+			id := r.LegacyArticleId
+			if id > 0 && len(out[i].CompatibleVehicles) == 0 {
+				articleIds = append(articleIds, id)
+				idToIdx[id] = append(idToIdx[id], i)
+			}
+		}
+		if len(articleIds) > 0 {
+			vehiclesById, err := s.tecDocVehicle.FindCompatibleVehiclesBatch(articleIds, 20)
+			if err != nil {
+				log.Printf("[enrichResults] batch vehicles err=%v (per-result fallback still in effect)", err)
+			} else {
+				for id, vehicles := range vehiclesById {
+					for _, idx := range idToIdx[id] {
+						if len(out[idx].CompatibleVehicles) == 0 {
+							out[idx].CompatibleVehicles = vehicles
+							// Legacy Compatibility []string for backward compat.
+							strs := make([]string, 0, len(vehicles))
+							for _, v := range vehicles {
+								strs = append(strs, v.VehicleName)
+							}
+							out[idx].Compatibility = strs
 						}
 					}
 				}

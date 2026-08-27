@@ -775,22 +775,10 @@ type supersessionWalker interface {
 	FindSupersession(legacyArticleId int) (model.SupersessionChain, error)
 }
 
-// SupersessionStrategy walks the replacement chain and returns the
-// current/successor parts.
-//
-// The strategy's entry gate is article-id promotion: the caller provides
-// an OEM string, we need one or more legacyArticleId values to seed the
-// TecDocSupersession walker. Before M0.T2, the strategy promoted via the
-// Postgres oem_search_index cache (~1,700 rows), which returned zero hits
-// for essentially every real HK OEM — so the whole strategy returned 0
-// results across every audited input (F1_correct = 0.00).
-//
-// The fix mirrors the four-source cascade PR #20 (c75c85a) applied to
-// enrichResults; see docs/data-sources/supersession-diagnosis.md.
-//
-// promoter / walker are optional injection points for tests. Both default
-// to the *SmartSearch shape used in production (see the constructor sites
-// in strategy_assembly.go); test code passes stubs instead.
+// SupersessionStrategy walks the replacement chain to return current +
+// successor parts. Article-id promotion goes through the four-source
+// cascade (M0.T2 fix); promoter/walker are optional injection points for
+// tests, both default to *SmartSearch in production.
 type SupersessionStrategy struct {
 	search   *SmartSearch
 	promoter articleIdPromoter  // optional; falls back to st.search
@@ -819,11 +807,6 @@ func (st *SupersessionStrategy) Search(ctx context.Context, req StrategyRequest)
 		walker = st.search.tecDocSuper
 	}
 
-	// Article-id promotion (see docs/data-sources/supersession-diagnosis.md).
-	// Same shape as enrichResults' promotion in enrichment.go — the
-	// four-source cascade PR #20 introduced. Empty result means no source
-	// recognized the OEM; return nil so callers of searchByMode see a
-	// graceful empty response instead of an error.
 	articleIds := promoter.PromoteOEMToArticleIds(ctx, req.OEM, 5)
 	if len(articleIds) == 0 {
 		return nil, nil
