@@ -241,8 +241,16 @@ func main() {
 			smartSearch.SetTecDocSupersession(service.NewTecDocSupersession(mysql))
 			smartSearch.SetTecDocFunctional(service.NewTecDocFunctional(mysql))
 			smartSearch.SetTecDocVehicle(service.NewTecDocVehicle(mysql))
+			// M0.T3: give VinAssemblyStrategy the VIN decoder so a
+			// 17-char alphanumeric query resolves through
+			// TecDoc.LinkageTargetsForNHTSA without the caller having
+			// to pre-compute linkageTargetId. VINDecoder is always
+			// constructed (line ~134); the setter is guarded here so
+			// the strategy only enables VIN detection when TecDoc is
+			// also live (both are required).
+			smartSearch.SetVINDecoder(vinDecoder)
 			tecdocEnabled = true
-			log.Println("✓ TecDoc reader attached to SmartSearch (OEM + crossref + specs + docs + supersession + functional + vehicle)")
+			log.Println("✓ TecDoc reader attached to SmartSearch (OEM + crossref + specs + docs + supersession + functional + vehicle + VIN)")
 			tecdoc.LogStats()
 		}
 	}
