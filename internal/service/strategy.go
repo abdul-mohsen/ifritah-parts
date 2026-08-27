@@ -761,29 +761,82 @@ func (st *VehicleFitmentStrategy) Search(ctx context.Context, req StrategyReques
 	return resp.Results, nil
 }
 
-// SupersessionStrategy walks the replacement chain and returns the current/successor parts.
-type SupersessionStrategy struct{ search *SmartSearch }
+// articleIdPromoter resolves an OEM string to one or more TecDoc
+// legacyArticleId values. Extracted as an interface so SupersessionStrategy
+// can be unit-tested without a live MySQL connection — the same design
+// used by supersessionHopRepo for the chain walker.
+type articleIdPromoter interface {
+	PromoteOEMToArticleIds(ctx context.Context, oem string, limit int) []int
+}
+
+// supersessionWalker is the chain-walking contract SupersessionStrategy
+// depends on. Implemented by *TecDocSupersession; stubbed in tests.
+type supersessionWalker interface {
+	FindSupersession(legacyArticleId int) (model.SupersessionChain, error)
+}
+
+// SupersessionStrategy walks the replacement chain and returns the
+// current/successor parts.
+//
+// The strategy's entry gate is article-id promotion: the caller provides
+// an OEM string, we need one or more legacyArticleId values to seed the
+// TecDocSupersession walker. Before M0.T2, the strategy promoted via the
+// Postgres oem_search_index cache (~1,700 rows), which returned zero hits
+// for essentially every real HK OEM — so the whole strategy returned 0
+// results across every audited input (F1_correct = 0.00).
+//
+// The fix mirrors the four-source cascade PR #20 (c75c85a) applied to
+// enrichResults; see docs/data-sources/supersession-diagnosis.md.
+//
+// promoter / walker are optional injection points for tests. Both default
+// to the *SmartSearch shape used in production (see the constructor sites
+// in strategy_assembly.go); test code passes stubs instead.
+type SupersessionStrategy struct {
+	search   *SmartSearch
+	promoter articleIdPromoter  // optional; falls back to st.search
+	walker   supersessionWalker // optional; falls back to st.search.tecDocSuper
+}
 
 func (st *SupersessionStrategy) Name() string            { return "supersession" }
 func (st *SupersessionStrategy) ConfidenceBase() float64 { return 0.85 }
 func (st *SupersessionStrategy) Priority() float64       { return 0.85 }
 func (st *SupersessionStrategy) Search(ctx context.Context, req StrategyRequest) ([]SmartResult, error) {
-	if req.OEM == "" || st.search.tecDocSuper == nil {
+	if req.OEM == "" {
 		return nil, nil
 	}
-	// We need a legacyArticleId first — run OEM lookup to get it
-	oemResult, err := st.search.oem.Search(req.OEM, 5)
-	if err != nil || oemResult == nil || len(oemResult.Results) == 0 {
+	promoter := st.promoter
+	if promoter == nil {
+		if st.search == nil {
+			return nil, nil
+		}
+		promoter = st.search
+	}
+	walker := st.walker
+	if walker == nil {
+		if st.search == nil || st.search.tecDocSuper == nil {
+			return nil, nil
+		}
+		walker = st.search.tecDocSuper
+	}
+
+	// Article-id promotion (see docs/data-sources/supersession-diagnosis.md).
+	// Same shape as enrichResults' promotion in enrichment.go — the
+	// four-source cascade PR #20 introduced. Empty result means no source
+	// recognized the OEM; return nil so callers of searchByMode see a
+	// graceful empty response instead of an error.
+	articleIds := promoter.PromoteOEMToArticleIds(ctx, req.OEM, 5)
+	if len(articleIds) == 0 {
 		return nil, nil
 	}
+
 	var results []SmartResult
 	seen := map[int]bool{}
-	for _, ref := range oemResult.Results {
-		if ref.LegacyArticleId <= 0 || seen[ref.LegacyArticleId] {
+	for _, id := range articleIds {
+		if id <= 0 || seen[id] {
 			continue
 		}
-		seen[ref.LegacyArticleId] = true
-		chain, cerr := st.search.tecDocSuper.FindSupersession(ref.LegacyArticleId)
+		seen[id] = true
+		chain, cerr := walker.FindSupersession(id)
 		if cerr != nil {
 			continue
 		}
@@ -807,6 +860,95 @@ func (st *SupersessionStrategy) Search(ctx context.Context, req StrategyRequest)
 		}
 	}
 	return results, nil
+}
+
+// PromoteOEMToArticleIds resolves an OEM string to one or more TecDoc
+// legacyArticleId values via the same four-source cascade used by
+// enrichResults (see enrichment.go and PR #20 / c75c85a). Cascade order,
+// broadest coverage first:
+//
+//  1. tecdoc.SearchByOEM               — MySQL oem_number (21.5M rows)
+//  2. tecDocCrossRef.SearchCrossReferences — MySQL articlecrosses (30M rows)
+//  3. tecdoc.SearchByOEMIndex          — MySQL oem_search_index (fuzzy)
+//  4. oem.Search                       — Postgres oem_search_index (legacy cache)
+//
+// The first step that returns a non-zero legacyArticleId wins; subsequent
+// steps are skipped. Errors from any single step are logged and the
+// cascade continues — no silent SQL swallowing (each step still returns
+// its own error to its caller), but a single sparse table cannot block
+// promotion.
+//
+// Every source is nil-safe: this method degrades to an empty slice when
+// TecDoc is not wired up (which is the case in unit tests and in offline
+// mode) without panicking.
+//
+// Callers that only need the first article should take out[0]; callers
+// that want to widen coverage (e.g. walk all chains) iterate the full
+// slice.
+func (s *SmartSearch) PromoteOEMToArticleIds(ctx context.Context, oem string, limit int) []int {
+	if s == nil || oem == "" {
+		return nil
+	}
+	seen := make(map[int]bool)
+	var out []int
+	collect := func(refs []model.OEMReference) {
+		for _, ref := range refs {
+			if ref.LegacyArticleId <= 0 || seen[ref.LegacyArticleId] {
+				continue
+			}
+			seen[ref.LegacyArticleId] = true
+			out = append(out, ref.LegacyArticleId)
+		}
+	}
+
+	// Step 1: MySQL oem_number (21.5M) — the primary TecDoc catalog.
+	if s.tecdoc != nil {
+		refs, err := s.tecdoc.SearchByOEM(oem, limit)
+		if err != nil {
+			log.Printf("[SmartSearch.PromoteOEMToArticleIds] step1 SearchByOEM err=%v", err)
+		} else {
+			collect(refs)
+		}
+	}
+
+	// Step 2: MySQL articlecrosses (30M rows, indexed by sql/06). Broader
+	// HK coverage than oem_number — this is the fallback PR #20 introduced
+	// for enrichResults after the 2026-08-23 quality audit showed 74% of
+	// HK OEMs never resolve via step 1 alone.
+	if len(out) == 0 && s.tecDocCrossRef != nil {
+		refs, err := s.tecDocCrossRef.SearchCrossReferences(oem, limit)
+		if err != nil {
+			log.Printf("[SmartSearch.PromoteOEMToArticleIds] step2 SearchCrossReferences err=%v", err)
+		} else {
+			collect(refs)
+		}
+	}
+
+	// Step 3: MySQL oem_search_index (PR #14) — fuzzy cross-refs cataloged
+	// against slightly different OEM strings.
+	if len(out) == 0 && s.tecdoc != nil {
+		refs, err := s.tecdoc.SearchByOEMIndex(oem, limit)
+		if err != nil {
+			log.Printf("[SmartSearch.PromoteOEMToArticleIds] step3 SearchByOEMIndex err=%v", err)
+		} else {
+			collect(refs)
+		}
+	}
+
+	// Step 4: Postgres oem_search_index — the small local cache, kept as a
+	// last-resort compatibility path (this was the ONLY source the pre-M0.T2
+	// SupersessionStrategy consulted; retained so anything already
+	// cataloged locally still resolves).
+	if len(out) == 0 && s.oem != nil {
+		result, err := s.oem.Search(oem, limit)
+		if err != nil {
+			log.Printf("[SmartSearch.PromoteOEMToArticleIds] step4 oem.Search err=%v", err)
+		} else if result != nil {
+			collect(result.Results)
+		}
+	}
+
+	return out
 }
 
 // CrossBrandStrategy uses FindCrossBrandEquivalents for Hyundai ↔ Kia sharing.
