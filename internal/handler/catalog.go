@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,9 +20,23 @@ func NewCatalogHandler(parts *service.PartsLookup, cross *service.CrossRef) *Cat
 	return &CatalogHandler{parts: parts, cross: cross}
 }
 
+// normalizeCatalogArg trims whitespace and forces uppercase on user-supplied
+// make/model query parameters. `vehicle_lookup` stores nhtsa_make and
+// nhtsa_model as UPPERCASE (populated by scripts/derive_hk_maps: `'HYUNDAI'`,
+// `'KIA'`, `'TUCSON'`, `'ELANTRA'`, etc.) so the underlying SQL query filters
+// with a case-sensitive `nhtsa_make = $1` predicate. Before this normaliser
+// existed, any browser request with mixed case (e.g. `?make=Hyundai&model=Elantra`)
+// silently matched zero rows — the exact user-visible bug that M0.T4 fixes.
+//
+// Uppercasing in the handler keeps the DB query simple + the
+// idx_vehicle_lookup_model B-tree usable (no functional index needed).
+func normalizeCatalogArg(raw string) string {
+	return strings.ToUpper(strings.TrimSpace(raw))
+}
+
 // Models handles GET /api/catalog/models?make=HYUNDAI
 func (h *CatalogHandler) Models(c *gin.Context) {
-	make := c.Query("make")
+	make := normalizeCatalogArg(c.Query("make"))
 	if make == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"makes": []string{"HYUNDAI", "KIA"},
@@ -38,9 +53,14 @@ func (h *CatalogHandler) Models(c *gin.Context) {
 }
 
 // Vehicles handles GET /api/catalog/vehicles?make=HYUNDAI&model=TUCSON
+//
+// M0.T4: make + model are uppercased before the DB query so mixed-case
+// input (`?make=Hyundai&model=Elantra`) resolves against the UPPERCASE
+// values stored in vehicle_lookup. Case-insensitive by handler
+// normalisation, not by SQL-side UPPER() calls — preserves index use.
 func (h *CatalogHandler) Vehicles(c *gin.Context) {
-	make := c.Query("make")
-	model := c.Query("model")
+	make := normalizeCatalogArg(c.Query("make"))
+	model := normalizeCatalogArg(c.Query("model"))
 	if make == "" || model == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provide make and model"})
 		return
