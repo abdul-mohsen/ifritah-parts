@@ -541,7 +541,7 @@ Assuming 1,000 unique OEMs looked up per day post-launch (heavier than qa today)
 
 ### Phase A · IMPLEMENTED and wired into Smart Search (this PR)
 
-**41 sources total** wired into `TecDoc.FindAftermarketForOEM` via `WithOnlineSearch()` in `cmd/server/main.go`. Each adapter is env-flag gated and defaults to disabled — the operator enables sources one at a time after qa verification.
+**41 sources total** wired into `TecDoc.FindAftermarketForOEM` via `WithOnlineSearch()` in `cmd/server/main.go`. **Every adapter is enabled by default** — the `ONLINE_<SOURCE>_ENABLED` env var only exists to DISABLE a source (set to `"false"` / `"0"` / `"no"`) if it starts misbehaving. Pre-launch posture: everything fires so we can see real HK aftermarket coverage numbers.
 
 Implemented sources by category:
 

@@ -719,10 +719,15 @@ func NewNGKAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
 	}, client, robots)
 }
 
-// AllG5AdaptersDefaultOff returns the full G5 adapter roster with a
-// shared http.Client + RobotsGuard. Every adapter is env-flag gated so
-// nothing fires unless the operator explicitly enables it. This is the
-// recommended shape for wiring in cmd/server/main.go:
+// AllG5Adapters returns the full G5 adapter roster with a shared
+// http.Client + RobotsGuard. Each adapter is **enabled by default** —
+// the env flag `ONLINE_<SOURCE>_ENABLED` only matters when the operator
+// wants to DISABLE a specific source by setting it to "false" / "0" /
+// "no". This is the right posture pre-launch: everything fires so we
+// can see real coverage numbers; individual sources can be turned off
+// via env when qa surfaces problems.
+//
+// The recommended wiring in cmd/server/main.go:
 //
 //	robots := service.NewRobotsGuard(nil)
 //	client := &http.Client{Timeout: 8 * time.Second}
@@ -730,11 +735,11 @@ func NewNGKAdapter(client *http.Client, robots *RobotsGuard) *GenericG5Adapter {
 //	    service.NewAftermarketOnlineCacheRepo(pg),
 //	    append(
 //	        []service.OnlineSource{service.NewEbayFinder(nil)},
-//	        service.AllG5AdaptersDefaultOff(client, robots)...,
+//	        service.AllG5Adapters(client, robots)...,
 //	    )...,
 //	)
 //	tecdoc = tecdoc.WithOnlineSearch(online)
-func AllG5AdaptersDefaultOff(client *http.Client, robots *RobotsGuard) []OnlineSource {
+func AllG5Adapters(client *http.Client, robots *RobotsGuard) []OnlineSource {
 	if robots == nil {
 		robots = NewRobotsGuard(client)
 	}

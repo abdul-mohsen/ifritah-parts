@@ -215,23 +215,22 @@ func main() {
 			// alongside its 3 TecDoc paths (articlecrosses / oem_number /
 			// oem_search_index). Cache-first read via Postgres
 			// aftermarket_online_cache; on miss the dispatcher parallel-
-			// queries every source whose ONLINE_<NAME>_ENABLED env flag
-			// is truthy. Each adapter is feature-flagged so the operator
-			// can enable them one-at-a-time as qa data proves them out.
+			// queries every enabled source.
 			//
+			// Every source is ENABLED by default. To disable a specific
+			// source without a redeploy set ONLINE_<NAME>_ENABLED=false.
 			// Global kill switch: ONLINE_SEARCH_ENABLED=false disables
-			// the entire subsystem in one env var — TecDoc falls back to
-			// its 3-path UNION behaviour identically to pre-M8.
+			// the whole subsystem in one env var.
 			cacheRepo := service.NewAftermarketOnlineCacheRepo(pg)
 			robots := service.NewRobotsGuard(nil)
 			httpClient := &http.Client{Timeout: 8 * time.Second}
 			sources := append(
 				[]service.OnlineSource{service.NewEbayFinder(nil)},
-				service.AllG5AdaptersDefaultOff(httpClient, robots)...,
+				service.AllG5Adapters(httpClient, robots)...,
 			)
 			online := service.NewOnlineSearch(cacheRepo, sources...)
 			tecdoc = tecdoc.WithOnlineSearch(online)
-			log.Printf("✓ Online-search dispatcher wired: %d sources (eBay + G5); each requires ONLINE_<SOURCE>_ENABLED=true", len(sources))
+			log.Printf("✓ Online-search dispatcher wired: %d sources (eBay + G5), all enabled by default; disable any via ONLINE_<SOURCE>_ENABLED=false", len(sources))
 
 			smartSearch.SetTecDoc(tecdoc)
 			// S2: articlecrosses cross-reference (30M rows)

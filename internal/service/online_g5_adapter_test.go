@@ -185,11 +185,11 @@ func TestGenericG5Adapter_5xxReturnsErr(t *testing.T) {
 	}
 }
 
-// TestAllG5AdaptersDefaultOff_ReturnsAllAdapters — smoke test for the
-// registry constructor. Expects ≥ 35 adapters (initial 17 + Autodoc-family
-// 6 + post-review overlooked 17 = 40 total).
-func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
-	adapters := AllG5AdaptersDefaultOff(nil, nil)
+// TestAllG5Adapters_ReturnsAllAdapters — smoke test for the registry
+// constructor. Expects ≥ 35 adapters (initial 17 + Autodoc-family 6 +
+// post-review overlooked 17 = 40 total).
+func TestAllG5Adapters_ReturnsAllAdapters(t *testing.T) {
+	adapters := AllG5Adapters(nil, nil)
 	if len(adapters) < 35 {
 		t.Errorf("expected ≥35 G5 adapters, got %d", len(adapters))
 	}
@@ -236,58 +236,79 @@ func TestAllG5AdaptersDefaultOff_ReturnsAllAdapters(t *testing.T) {
 	}
 }
 
-// TestAllG5AdaptersDefaultOff_DisabledByDefault — no env flags set → every
-// adapter is disabled → no outbound HTTP.
-func TestAllG5AdaptersDefaultOff_DisabledByDefault(t *testing.T) {
-	// Clear all G5 env flags for this test.
-	for _, f := range []string{
-		"ONLINE_HYUNDAIPARTSDEAL_ENABLED",
-		"ONLINE_KIAPARTSNOW_ENABLED",
-		"ONLINE_HYUNDAIPARTSDEPARTMENT_ENABLED",
-		"ONLINE_KOREANPARTSONLINE_ENABLED",
-		"ONLINE_7ZAP_ENABLED",
-		"ONLINE_REALOEM_ENABLED",
-		"ONLINE_PARTSGEEK_ENABLED",
-		"ONLINE_CARID_ENABLED",
-		"ONLINE_AUTOZONE_ENABLED",
-		"ONLINE_ADVANCEAUTOPARTS_ENABLED",
-		"ONLINE_NAPA_ENABLED",
-		"ONLINE_1AAUTO_ENABLED",
-		"ONLINE_BUYAUTOPARTS_ENABLED",
-		"ONLINE_OREILLY_ENABLED",
-		"ONLINE_FCPEURO_ENABLED",
-		"ONLINE_USAUTOPARTS_ENABLED",
-		"ONLINE_JCWHITNEY_ENABLED",
-		"ONLINE_PARTSAVATAR_ENABLED",
-		"ONLINE_AUTODOC_ENABLED",
-		"ONLINE_AUTODOC_DE_ENABLED",
-		"ONLINE_OSCARO_ENABLED",
-		"ONLINE_GSFCARPARTS_ENABLED",
-		"ONLINE_MICKSGARAGE_ENABLED",
-		"ONLINE_ONLINECARPARTS_ENABLED",
-		"ONLINE_EUROCARPARTS_ENABLED",
-		"ONLINE_EMEX_ENABLED",
-		"ONLINE_NOON_ENABLED",
-		"ONLINE_ALMANEA_ENABLED",
-		"ONLINE_BOSCH_ENABLED",
-		"ONLINE_MANN_ENABLED",
-		"ONLINE_MAHLE_ENABLED",
-		"ONLINE_DENSO_ENABLED",
-		"ONLINE_HELLA_ENABLED",
-		"ONLINE_VALEO_ENABLED",
-		"ONLINE_FEBI_ENABLED",
-		"ONLINE_BREMBO_ENABLED",
-		"ONLINE_SKF_ENABLED",
-		"ONLINE_GATES_ENABLED",
-		"ONLINE_NGK_ENABLED",
-		"ONLINE_OILFILTER_XREF_ENABLED",
-	} {
+// TestAllG5Adapters_EnabledByDefault — when no env flags are set, every
+// adapter reports Enabled=true. Sources are ON by default; the flag is
+// only consulted to DISABLE ("false" / "0" / "no"). This is the correct
+// posture pre-launch — everything fires so we can see real coverage.
+func TestAllG5Adapters_EnabledByDefault(t *testing.T) {
+	// Make sure no leftover env from other tests forces adapters off.
+	for _, f := range g5EnvFlags {
+		t.Setenv(f, "")
+	}
+	adapters := AllG5Adapters(nil, nil)
+	for _, a := range adapters {
+		if !a.Enabled() {
+			t.Errorf("%s: expected Enabled=true with empty flag, got false", a.Name())
+		}
+	}
+}
+
+// TestAllG5Adapters_DisabledByExplicitFalse — setting the env flag to
+// "false" DOES disable the adapter. Guards the per-source kill-switch
+// behaviour for when an operator needs to turn one source off quickly.
+func TestAllG5Adapters_DisabledByExplicitFalse(t *testing.T) {
+	for _, f := range g5EnvFlags {
 		t.Setenv(f, "false")
 	}
-	adapters := AllG5AdaptersDefaultOff(nil, nil)
+	adapters := AllG5Adapters(nil, nil)
 	for _, a := range adapters {
 		if a.Enabled() {
 			t.Errorf("%s: expected Enabled=false with flag=false, got true", a.Name())
 		}
 	}
+}
+
+// g5EnvFlags is the exhaustive list of per-adapter env kill-switches.
+// Keep in sync with the AllG5Adapters registry.
+var g5EnvFlags = []string{
+	"ONLINE_HYUNDAIPARTSDEAL_ENABLED",
+	"ONLINE_KIAPARTSNOW_ENABLED",
+	"ONLINE_HYUNDAIPARTSDEPARTMENT_ENABLED",
+	"ONLINE_KOREANPARTSONLINE_ENABLED",
+	"ONLINE_7ZAP_ENABLED",
+	"ONLINE_REALOEM_ENABLED",
+	"ONLINE_PARTSGEEK_ENABLED",
+	"ONLINE_CARID_ENABLED",
+	"ONLINE_AUTOZONE_ENABLED",
+	"ONLINE_ADVANCEAUTOPARTS_ENABLED",
+	"ONLINE_NAPA_ENABLED",
+	"ONLINE_1AAUTO_ENABLED",
+	"ONLINE_BUYAUTOPARTS_ENABLED",
+	"ONLINE_OREILLY_ENABLED",
+	"ONLINE_FCPEURO_ENABLED",
+	"ONLINE_USAUTOPARTS_ENABLED",
+	"ONLINE_JCWHITNEY_ENABLED",
+	"ONLINE_PARTSAVATAR_ENABLED",
+	"ONLINE_AUTODOC_ENABLED",
+	"ONLINE_AUTODOC_DE_ENABLED",
+	"ONLINE_OSCARO_ENABLED",
+	"ONLINE_GSFCARPARTS_ENABLED",
+	"ONLINE_MICKSGARAGE_ENABLED",
+	"ONLINE_ONLINECARPARTS_ENABLED",
+	"ONLINE_EUROCARPARTS_ENABLED",
+	"ONLINE_EMEX_ENABLED",
+	"ONLINE_NOON_ENABLED",
+	"ONLINE_ALMANEA_ENABLED",
+	"ONLINE_BOSCH_ENABLED",
+	"ONLINE_MANN_ENABLED",
+	"ONLINE_MAHLE_ENABLED",
+	"ONLINE_DENSO_ENABLED",
+	"ONLINE_HELLA_ENABLED",
+	"ONLINE_VALEO_ENABLED",
+	"ONLINE_FEBI_ENABLED",
+	"ONLINE_BREMBO_ENABLED",
+	"ONLINE_SKF_ENABLED",
+	"ONLINE_GATES_ENABLED",
+	"ONLINE_NGK_ENABLED",
+	"ONLINE_OILFILTER_XREF_ENABLED",
 }

@@ -252,7 +252,7 @@ type OnlineResult struct {
 
 **Approach:**
 
-1. Env-gated: `ONLINE_HYUNDAIPARTSDEAL_ENABLED=true` required (default false).
+1. Env-gated: `ONLINE_HYUNDAIPARTSDEAL_ENABLED` — **defaults to enabled**; setting it to `"false"` / `"0"` / `"no"` disables the source.
 2. URL pattern: `https://www.hyundaipartsdeal.com/search?catchall=<OEM>`.
 3. Use `RobotsGuard` first — abort if disallowed.
 4. Use `RateLimiter` from M8.T5 — wait for token.
@@ -546,17 +546,15 @@ The dispatcher (`internal/service/online_search.go`) already fans out to `[]Onli
 
 ### Feature-flag matrix (env vars)
 
-Each source gets its own kill switch. Recommended defaults for a fresh deploy:
+Every adapter has an env kill switch. **All sources default to ENABLED** — flags only exist to let an operator DISABLE a specific source quickly if it misbehaves (429s, ToS objection, HTML shape change, etc.). This is the right posture pre-launch — everything fires so we can see real coverage numbers.
 
-| Variable | qa default | prod default |
-|---|:-:|:-:|
-| `ONLINE_SEARCH_ENABLED` | `true` | `false` (opt-in per-source) |
-| `ONLINE_EBAY_ENABLED` | `true` | `true` after 1 week of qa data |
-| `ONLINE_ALIEXPRESS_ENABLED` | `true` | `true` after quota verification |
-| `ONLINE_HYUNDAIPARTSDEAL_ENABLED` | `true` | `true` after ToS review |
-| `ONLINE_KIAPARTSNOW_ENABLED` | `true` | `true` after ToS review |
-| `ONLINE_PARTSGEEK_ENABLED` | `true` | `true` after ToS review |
-| `ONLINE_EMEX_ENABLED` | `true` | `true` |
-| … all other adapters | `false` | `false` (enable one at a time) |
+| Variable | Effect when unset (default) | Effect when set to `"false"` |
+|---|---|---|
+| `ONLINE_SEARCH_ENABLED` | subsystem enabled | entire subsystem disabled (kill switch) |
+| `ONLINE_EBAY_ENABLED` | eBay adapter enabled (still needs `EBAY_APP_ID`) | eBay adapter disabled |
+| `ONLINE_HYUNDAIPARTSDEAL_ENABLED` | HyundaiPartsDeal enabled | HyundaiPartsDeal disabled |
+| `ONLINE_<any>_ENABLED` | that adapter enabled | that adapter disabled |
 
-This lets you ramp up sources progressively while measuring the per-source contribution to `AvgAM_correct` in the nightly audit.
+Accepted "disable" values: `"false"` / `"0"` / `"no"` (case-insensitive). Any other value (or unset) means enabled.
+
+Once qa data surfaces sources that misbehave, an operator disables them via the per-source env var. No redeploy required.
