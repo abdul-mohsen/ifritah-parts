@@ -11,8 +11,7 @@
 --   H3: Article-id promotion at strategy entry (line 605
 --       st.search.oem.Search(req.OEM, 5)) returns 0 refs for these OEMs
 --
--- Run against qa MySQL (TecDoc read replica). Paste output into
--- docs/data-sources/supersession-diagnosis.md.
+-- Run against qa MySQL (TecDoc read replica).
 -- ============================================================================
 
 -- ── 1. Table sizes (falsifies H1) ──────────────────────────────────────────

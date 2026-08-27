@@ -115,36 +115,10 @@ func (p *smartSearchOEMPromoter) FetchDataSupplierIds(articleIds []int) (map[int
 	return p.tecdoc.FetchDataSupplierIds(articleIds)
 }
 
-// promoteArticleIds is the chained-fallback article-id promotion pipeline
-// (M3.S1.T1). Given an OEM string, consults three sources in order and
-// returns the canonical article id plus the deduplicated ref set of the
-// FIRST successful layer.
-//
-// Fast-path semantics: when layer 1 returns any refs, layers 2 and 3 are
-// NOT called. This is by design — see
-// docs/data-sources/article-id-promotion-diagnosis.md for the
-// fallthrough-vs-UNION trade-off analysis. The short version:
-//   - layer 1 (oem_number) is the highest-quality signal — trust it when
-//     it hits.
-//   - layer 3 (oem_search_index) is a subset of layer 1 in the happy path
-//     (SearchByOEM unions both internally), so calling it unconditionally
-//     would double-hit the same table.
-//   - the DoD is a promotion RATE lift, not maximum-candidate recall.
-//
-// The canonical pick applies INSIDE the winning layer: if layer 1 returns
-// five distinct article ids (Bosch / MANN / MAHLE / Denso / Valeo all
-// catalog the same Hyundai OEM), we pick the id whose row in `articles`
-// has the highest dataSupplierId (proxy for most-recently-cataloged, hence
-// most-authoritative). Single-candidate layers skip the DB round-trip.
-//
-// Returns (bestArticleId, deduplicatedRefs, nil) on success. Returns
-// (0, nil, errNoPromotion) when every source returned zero refs. Ctx
-// cancellation between layers surfaces as (0, nil, ctx.Err()).
-//
-// Errors from individual layer calls are LOGGED but not fatal — the
-// pipeline moves on to the next layer, matching the pre-M3 inline
-// behavior. This is a soft-fail design: a MySQL blip on articlecrosses
-// shouldn't kill enrichment when oem_search_index is still available.
+// promoteArticleIds walks oem_number → articlecrosses → oem_search_index
+// and returns the first non-empty layer's refs. Within the winning layer
+// the article id with the highest dataSupplierId wins. Errors per layer
+// are logged and fall through. All-empty → errNoPromotion.
 func promoteArticleIds(ctx context.Context, p oemPromoter, oem string, perLayerLimit int) (int, []model.OEMReference, error) {
 	if p == nil || oem == "" {
 		return 0, nil, errNoPromotion

@@ -206,24 +206,10 @@ func (t *TecDoc) SearchByOEMIndex(oemNumber string, limit int) ([]model.OEMRefer
 	return refs, nil
 }
 
-// FetchDataSupplierIds returns the dataSupplierId per legacyArticleId for
-// the requested article-id set, as a single batched IN-list query against
-// the `articles` table. Introduced by M3.S1.T1 to power the canonical-pick
-// tiebreak in the article-id promotion pipeline (see
-// docs/data-sources/article-id-promotion-diagnosis.md).
-//
-// Returned map only contains ids that resolved; missing ids (zero, negative,
-// or not present in `articles`) are silently dropped so the caller can treat
-// "missing" as "unknown supplier — score 0" without extra bookkeeping.
-//
-// dataSupplierId is the TecDoc supplier-registration id. Higher values are
-// suppliers who registered their catalog more recently — a rough proxy for
-// "canonical/current" when two articles compete for the same OEM. The
-// roadmap M3.S1.T1 calls this out explicitly as the tiebreak signal.
-//
-// Empty input returns (nil, nil). Fails loud on DB errors — the caller
-// tolerates missing tiebreak data (falls back to first-seen article id)
-// but should not silently ignore a real query failure.
+// FetchDataSupplierIds returns dataSupplierId per legacyArticleId (batched
+// IN-list against `articles`). Used as the canonical-pick tiebreak in the
+// promoteArticleIds pipeline — higher supplier id wins. Missing ids are
+// dropped from the returned map. Empty input → (nil, nil).
 func (t *TecDoc) FetchDataSupplierIds(articleIds []int) (map[int]int, error) {
 	if t.db == nil {
 		return nil, fmt.Errorf("database not connected")
