@@ -56,11 +56,11 @@ Applied migrations before this run:
 - [ ] `sql/08_articlecriteria_criteria_value_hotfix.sql`
 - [ ] (list any other DB-side changes)
 
-<!-- BEGIN tecdoc-min output -->
+<!-- BEGIN tecdoc-diagnostic output -->
 ```
-(paste tecdoc-min-{ts}.txt here — full output of tecdoc_health_report_min.sql)
+(paste tecdoc-diagnostic-{ts}.txt here — full output of tecdoc_diagnostic_full.sql)
 ```
-<!-- END tecdoc-min output -->
+<!-- END tecdoc-diagnostic output -->
 
 ### Section-by-section verdict
 

@@ -9,7 +9,7 @@
 
     1. scripts/audit/audit-quality.ps1        (API-side quality audit)
     2. scripts/audit/analyze-quality.ps1      (per-slice + per-category CSVs)
-    3. scripts/diagnostics/tecdoc_health_report_min.sql
+    3. scripts/diagnostics/tecdoc_diagnostic_full.sql
        (DB-side diagnostic — this script only PRINTS the mysql command;
         the actual DB run happens outside because we don't ship DB creds
         in the repo)
@@ -136,21 +136,21 @@ in this exact order, and save the outputs into the report dir:
      mysql --host=<your-tecdoc-mysql> --user=<user> --password --database=<db> \
            < sql/08_articlecriteria_criteria_value_hotfix.sql
 
-  2. Run the minimal 30-second diagnostic:
+  2. Run the consolidated audit + diagnostic (2-8 min):
 
      mysql --host=<your-tecdoc-mysql> --user=<user> --password --database=<db> \
-           < scripts/diagnostics/tecdoc_health_report_min.sql \
-           > $ReportDir\tecdoc-min-$Timestamp.txt
+           < scripts/diagnostics/tecdoc_diagnostic_full.sql \
+           > $ReportDir\tecdoc-diagnostic-$Timestamp.txt
 
-The minimal diagnostic answers 7 questions in ~30 seconds:
-  A. Do the 19 real HK corpus OEMs resolve via oem_number?
-  B. What REAL aftermarket brands appear per corpus OEM?
-     (via articles.dataSupplierId → ambrand.brandId)
-  C. Do the corpus articles have supersession chains?
-  D. Do they have specs?
-  E. HK vehicle catalog (Hyundai/Kia/Genesis linkage IDs)
-  F. Language distribution
-  G. EXPLAIN plans — G1 confirms sql/08 index is used by the planner
+The consolidated diagnostic answers every audit question in one run:
+  Part A. Environment — table sizes, schema, P0 index PASS/FAIL summary
+  Part B. HK data coverage — oem_number / articlecrosses / articlecriteria /
+          articlesvehicletrees / supersession / vehicle catalog / language
+  Part C. REAL aftermarket brands via articles.dataSupplierId → ambrand
+          (the correct JOIN, not the buggy mfrId) + marquee-brand probe
+  Part D. 19-OEM corpus verification — resolve rate, brand diversity, specs
+  Part E. Sample rows for spot-check
+  Part F. EXPLAIN plans on hot queries (verifies sql/06+sql/07+sql/08 hit)
 "@
 
 if (-not $SkipDb) {
@@ -216,11 +216,11 @@ if ($SkipDb) {
     [void]$report.AppendLine("Run the SQL files listed in the console output. Paste the output into this")
     [void]$report.AppendLine("report between the fences below (or attach the ``.txt`` file to the PR):")
     [void]$report.AppendLine("")
-    [void]$report.AppendLine("<!-- BEGIN tecdoc-min output -->")
+    [void]$report.AppendLine("<!-- BEGIN tecdoc-diagnostic output -->")
     [void]$report.AppendLine('```')
-    [void]$report.AppendLine("(paste tecdoc-min-$Timestamp.txt here)")
+    [void]$report.AppendLine("(paste tecdoc-diagnostic-$Timestamp.txt here)")
     [void]$report.AppendLine('```')
-    [void]$report.AppendLine("<!-- END tecdoc-min output -->")
+    [void]$report.AppendLine("<!-- END tecdoc-diagnostic output -->")
 }
 
 [void]$report.AppendLine("")

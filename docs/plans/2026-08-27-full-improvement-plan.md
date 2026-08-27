@@ -145,7 +145,7 @@ Free-only path.
 - **A2.1** Apply `sql/08` hotfix (PR #22, ops task)
 - **A2.2** Fix `strategy_spec_match.go` `mfrId → dataSupplierId`
 - **A2.3** Fix supersession strategy (M0.T2 — article-id promotion)
-- **A2.4** Verify M2.S3 supersession walker end-to-end via min-report Section C
+- **A2.4** Verify M2.S3 supersession walker end-to-end via tecdoc_diagnostic_full.sql Part B §9
 
 ### Dim 3 · Aftermarket replacement (2 → 6)
 
@@ -294,7 +294,7 @@ Summary sequence:
 | eBay Motors API rate limit (5K/day) too low | Dim 3 doesn't reach 6 | Cache aggressively (30d TTL); apply for Enterprise tier (still free, higher quota); prioritize top-500 OEMs |
 | G5 sites change ToS or add Cloudflare block | Wave 3 partial | Feature-flag each adapter; graceful-degrade; keep eBay as anchor |
 | eBay Motors data quality noisy (seller-provided) | Brand attribution imprecise | Reuse existing `NormalizeBrand` + `BrandTier` — same pipeline as TecDoc results |
-| Min-report Section B shows existing coverage already sufficient | Wave 3 was unnecessary | Reduce Wave 3 to eBay-only, skip G5 adapters. Not a regression risk. |
+| tecdoc_diagnostic_full.sql Part C §12 shows existing coverage already sufficient | Wave 3 was unnecessary | Reduce Wave 3 to eBay-only, skip G5 adapters. Not a regression risk. |
 | Community contributions attract spam | Data pollution | Rate limit + admin moderation gate (already in PR #20 backend); public UI enforces reCAPTCHA |
 | sql/08 apply blocks writes on prod-scale table | 15-min DDL window | Schedule during low-traffic; use `pt-online-schema-change` if needed |
 

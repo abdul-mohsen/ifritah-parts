@@ -5,7 +5,7 @@ diagnostic together, then combines them into a single dated report at
 `docs/reports/{date}-engine-health/summary.md`.
 
 Ships with PR "combine audit + diagnostics" (this PR). Depends on the
-scripts introduced in PR #22 (`tecdoc_health_report_min.sql` +
+scripts introduced in PR #22 (`tecdoc_diagnostic_full.sql` +
 `sql/08_articlecriteria_criteria_value_hotfix.sql`).
 
 ---
@@ -39,7 +39,7 @@ Three stages, one command:
 │   │  sql/08 apply   │─┐                           │          │     │
 │   └─────────────────┘ │                           │          │     │
 │   ┌─────────────────┐ ├──▶ operator pastes ──────▶│  paste   │     │
-│   │  tecdoc-min.sql │ │    output.txt into        │  slot    │     │
+│   │  tecdoc_diagnostic_full.sql │ │    output.txt into        │  slot    │     │
 │   └─────────────────┘ │    summary.md             │          │     │
 │           DB half     │                           │          │     │
 │           (manual)    │                           └──────────┘     │
@@ -125,31 +125,30 @@ mysql --host=<tecdoc-mysql-host> --user=<user> --password --database=<db> \
 
 5-15 min DDL on 27M rows, online, no application downtime.
 
-### Step 2 — Run the minimal diagnostic
+### Step 2 — Run the full diagnostic
 
 ```bash
 mysql --host=<tecdoc-mysql-host> --user=<user> --password --database=<db> \
-      < scripts/diagnostics/tecdoc_health_report_min.sql \
-      > docs/reports/{date}-engine-health/tecdoc-min-{timestamp}.txt
+      < scripts/diagnostics/tecdoc_diagnostic_full.sql \
+      > docs/reports/{date}-engine-health/tecdoc-diagnostic-{timestamp}.txt
 ```
 
-Runtime ~30 seconds. Answers 7 questions:
+Runtime **2-8 min** (longer only when P0 indexes are missing — the EXPLAINs in Part F will flag which). Covers 23 numbered sections across six parts:
 
-| § | Question |
-|---|---|
-| A | Do the 19 real HK corpus OEMs resolve via `oem_number`? |
-| B | What REAL aftermarket brands appear per corpus OEM? |
-| C | Do the corpus articles have supersession chains? |
-| D | Do they have specs? |
-| E | HK vehicle catalog (Hyundai / Kia / Genesis linkage IDs) |
-| F | Language distribution |
-| G | EXPLAIN plans — G1 confirms `sql/08` index is used by the planner |
+| Part | Sections | Answers |
+|---|---|---|
+| A · Environment | §1-§4 | Table sizes, P0 index PASS/FAIL summary (sql/06 + sql/07 + sql/08), articles/ambrand/articlecriteria schema, HK manufacturers + brand catalog |
+| B · HK data coverage | §5-§11 | oem_number, articlecrosses, articlecriteria, articlesvehicletrees linkingTargetType, supersession, vehicle catalog, language distribution |
+| C · REAL aftermarket answer | §12-§13 | Per-HK-prefix aftermarket brands via `articles.dataSupplierId → ambrand.brandId` (correct JOIN) + explicit marquee-brand probe |
+| D · Corpus verification | §14-§16 | 19-OEM audit corpus: resolve rate, brand diversity, spec coverage |
+| E · Sample rows | §17 | Spot-check data shape |
+| F · EXPLAIN plans | §18-§23 | Validates every hot query hits an index (sql/06, sql/07, sql/08) |
 
 ### Step 3 — Paste the output
 
 The script pre-generates `docs/reports/{date}-engine-health/summary.md` with a
-paste slot fenced by `<!-- BEGIN tecdoc-min output -->` and
-`<!-- END tecdoc-min output -->`. Drop the `.txt` output between the fences.
+paste slot fenced by `<!-- BEGIN tecdoc-diagnostic output -->` and
+`<!-- END tecdoc-diagnostic output -->`. Drop the `.txt` output between the fences.
 
 ---
 
@@ -158,7 +157,7 @@ paste slot fenced by `<!-- BEGIN tecdoc-min output -->` and
 ```
 docs/reports/{date}-engine-health/
 ├── summary.md                 ← auto-generated, has paste slot for DB output
-├── tecdoc-min-{ts}.txt        ← operator-created (mysql output)
+├── tecdoc-diagnostic-{ts}.txt        ← operator-created (mysql output)
 ├── qa-quality-raw-{ts}.csv    ← audit raw
 ├── qa-quality-summary-{ts}.md ← audit summary
 ├── qa-quality-by-slice-{ts}.csv
@@ -198,6 +197,6 @@ into one combined report.
 
 - `scripts/audit/audit-quality.ps1` — raw API audit (used internally by the runbook)
 - `scripts/audit/analyze-quality.ps1` — analyzer (used internally by the runbook)
-- `scripts/diagnostics/tecdoc_health_report_min.sql` — DB diagnostic (PR #22)
+- `scripts/diagnostics/tecdoc_diagnostic_full.sql` — DB diagnostic (PR #22)
 - `sql/08_articlecriteria_criteria_value_hotfix.sql` — DB migration (PR #22)
 - `docs/reports/TEMPLATE-engine-health.md` — the report template the script generates

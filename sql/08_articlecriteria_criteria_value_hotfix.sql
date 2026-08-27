@@ -7,7 +7,7 @@
 --   * idx_articlecriteria_criteria_value    ← this one never applied
 --
 -- The 2026-08-26 TecDoc-health diagnostic
--- (scripts/diagnostics/tecdoc_health_report.sql section 2) revealed that
+-- (scripts/diagnostics/tecdoc_diagnostic_full.sql section 2) revealed that
 -- on the current qa TecDoc MySQL, ONLY THE FIRST INDEX was applied:
 --
 --   check_name                              | status

@@ -398,7 +398,7 @@ Every adapter must respect:
 
 ## Exit gate for M8
 
-Run the min-report (PR #22) after M8 lands. Additionally:
+Run the consolidated diagnostic (tecdoc_diagnostic_full.sql) after M8 lands. Additionally:
 
 | Metric | Target |
 |---|---|
