@@ -4,13 +4,27 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 
 	"parts-engine/internal/model"
 )
 
 // vehicleFitmentRepo is the injectable DB dep for TecDocVehicle.
+//
+// Two query paths, in strict order of preference:
+//
+//  1. QueryCompatibleVehicles — primary. 4-way join
+//     (articlesvehicletrees + linkagetargets + modelseries + manufacturers).
+//     Returns richly-decorated rows with Make/Model/CategoryHint. Loses
+//     rows when modelseries or manufacturers has a gap.
+//
+//  2. QueryCompatibleVehiclesFallback — M3.S2.T1 fallback. 2-way join
+//     (articlesvehicletrees + linkagetargets only). No lang filter.
+//     Broader coverage; Make/Model/CategoryHint may be empty.
+//     See docs/data-sources/vehicle-fitment-fallback.md.
 type vehicleFitmentRepo interface {
 	QueryCompatibleVehicles(ctx context.Context, legacyArticleId, limit int) ([]compatibleVehicleRow, error)
+	QueryCompatibleVehiclesFallback(ctx context.Context, legacyArticleId, limit int) ([]compatibleVehicleRow, error)
 }
 
 type compatibleVehicleRow struct {
@@ -47,6 +61,20 @@ func NewTecDocVehicle(db *sql.DB) *TecDocVehicle {
 // limit is clamped to [1, 200] — the caller usually pages the result
 // via a separate handler, this is not meant to hydrate the entire
 // 651M-row table in one call.
+//
+// Fallback (M3.S2.T1): when the primary 4-way join returns zero rows,
+// retry with a looser 2-way join against articlesvehicletrees +
+// linkagetargets only. See docs/data-sources/vehicle-fitment-fallback.md
+// for the schema comparison and why this widens coverage without
+// regressing the fast-path.
+//
+// Error contract:
+//   - primary DB error       → returned to caller (fail loud)
+//   - primary rows > 0       → returned; fallback is NOT executed
+//   - primary rows = 0       → fallback attempted
+//   - fallback DB error      → logged as warning; return the empty
+//     primary result (not an error — we don't want a fallback-only
+//     failure to mask what is legitimately "no fitment")
 func (s *TecDocVehicle) FindCompatibleVehicles(legacyArticleId, limit int) ([]model.CompatibleVehicle, error) {
 	if s.repo == nil {
 		return nil, fmt.Errorf("database not connected")
@@ -58,11 +86,36 @@ func (s *TecDocVehicle) FindCompatibleVehicles(legacyArticleId, limit int) ([]mo
 		limit = 50
 	}
 
-	rows, err := s.repo.QueryCompatibleVehicles(context.Background(), legacyArticleId, limit)
+	ctx := context.Background()
+
+	rows, err := s.repo.QueryCompatibleVehicles(ctx, legacyArticleId, limit)
 	if err != nil {
 		return nil, fmt.Errorf("find compatible vehicles: %w", err)
 	}
+	primary := s.buildResults(legacyArticleId, rows)
+	if len(primary) > 0 {
+		return primary, nil
+	}
 
+	// Primary is empty — attempt the articlesvehicletrees-only fallback.
+	fbRows, fbErr := s.repo.QueryCompatibleVehiclesFallback(ctx, legacyArticleId, limit)
+	if fbErr != nil {
+		log.Printf("[vehicle_fitment] primary empty, fallback errored for legacyArticleId=%d: %v",
+			legacyArticleId, fbErr)
+		return primary, nil
+	}
+	fallback := s.buildResults(legacyArticleId, fbRows)
+	log.Printf("[vehicle_fitment] primary empty, fallback returned %d rows for legacyArticleId=%d",
+		len(fallback), legacyArticleId)
+	return fallback, nil
+}
+
+// buildResults dedups compatibleVehicleRow entries by LinkageTargetId and
+// projects them into the CompatibleVehicle model. Rows with
+// LinkageTargetId == 0 or duplicate LinkageTargetId are dropped. The
+// first-seen row per LinkageTargetId wins, so callers should ORDER BY
+// their preferred-locale/preferred-year signal first.
+func (s *TecDocVehicle) buildResults(legacyArticleId int, rows []compatibleVehicleRow) []model.CompatibleVehicle {
 	out := make([]model.CompatibleVehicle, 0, len(rows))
 	seen := map[int]bool{}
 	for _, r := range rows {
@@ -92,7 +145,7 @@ func (s *TecDocVehicle) FindCompatibleVehicles(legacyArticleId, limit int) ([]mo
 			FitmentDriver:   driverName(ClassifyCategory(r.CategoryHint).Driver),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // yearFromYearMonth extracts the 4-digit year from a TecDoc YYYYMM integer
@@ -155,6 +208,67 @@ func (r *sqlVehicleFitmentRepo) QueryCompatibleVehicles(ctx context.Context, leg
 		); err != nil {
 			continue
 		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+// QueryCompatibleVehiclesFallback runs the 2-way articlesvehicletrees +
+// linkagetargets query when the primary 4-way join finds nothing. Drops
+// the modelseries + manufacturers inner joins and the lang='en' filter
+// so rows survive when either denormalization side has a gap.
+//
+// Trade-off: Make / Model / CategoryHint come back empty because we
+// removed the tables that populated them. The description in
+// VehicleName still starts with "HYUNDAI TUCSON (TL) …" so
+// parseVehicleDescription can still extract Chassis + EngineSpec, and
+// downstream renderers can display the raw description as fallback.
+//
+// The ORDER BY `(lt.lang = 'en') DESC` prefix makes the English row
+// sort first when it exists so buildResults' first-seen dedup keeps the
+// English label; a non-English description is only surfaced when
+// English is genuinely absent for that linkage target.
+//
+// See docs/data-sources/vehicle-fitment-fallback.md.
+func (r *sqlVehicleFitmentRepo) QueryCompatibleVehiclesFallback(ctx context.Context, legacyArticleId, limit int) ([]compatibleVehicleRow, error) {
+	const q = `
+		SELECT
+			avt.linkingTargetId,
+			COALESCE(lt.description, ''),
+			COALESCE(lt.beginYearMonth, 0),
+			COALESCE(lt.endYearMonth, 0),
+			COALESCE(lt.fuelType, ''),
+			COALESCE(lt.capacityCC, 0),
+			COALESCE(lt.horsePowerFrom, 0)
+		FROM articlesvehicletrees avt
+		JOIN linkagetargets lt ON lt.linkageTargetId = avt.linkingTargetId
+		WHERE avt.legacyArticleId = ?
+		  AND avt.linkingTargetType = 'P'
+		ORDER BY (lt.lang = 'en') DESC, lt.beginYearMonth DESC, avt.linkingTargetId
+		LIMIT ?`
+
+	rows, err := logQueryCtx(r.db, ctx, "TecDocVehicle.FindCompatibleVehicles.fallback", q, legacyArticleId, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []compatibleVehicleRow
+	for rows.Next() {
+		var row compatibleVehicleRow
+		if err := rows.Scan(
+			&row.LinkageTargetId,
+			&row.VehicleName,
+			&row.BeginYearMonth,
+			&row.EndYearMonth,
+			&row.FuelType,
+			&row.CapacityCC,
+			&row.HorsePower,
+		); err != nil {
+			continue
+		}
+		// Make, Model, CategoryHint remain empty — not available from
+		// the 2-way join. Consumers get raw VehicleName and can parse.
 		out = append(out, row)
 	}
 	return out, nil
