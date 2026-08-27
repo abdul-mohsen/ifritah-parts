@@ -1,0 +1,49 @@
+=====================================================================
+QA SEARCH QUALITY REPORT - 2026-08-27_1345
+=====================================================================
+Source: /home/runner/work/ifritah-parts/ifritah-parts/qa-quality-raw-2026-08-27_1344.csv
+Rows:   0
+
+--- Ground truth distribution ---
+
+
+--- OVERALL ---
+  TIER 1 - CORRECTNESS (target: F1_correct >= 0.95)
+    F1_hit      = 0   (returned any result)
+    F1_correct  = 0   (returned RIGHT-category part - hard requirement)
+
+  TIER 2 - RICHNESS (target: AvgRepl_correct >= 5 on wear parts)
+    AvgRepl_correct  = 0 replacements per correct hit (aftermarket + OEMxRef + supersession)
+    AvgAM_correct    = 0 aftermarket brands per correct hit
+    AvgOEMxRef_correct = 0 TecDoc OEM cross-refs per correct hit
+
+  TIER 3 - RICHNESS BARS
+    F1_rich3   = 0   (correct part + >= 3 replacements)
+    F1_rich5   = 0   (correct part + >= 5 replacements)
+    F1_rich10  = 0  (correct part + >= 10 replacements)
+
+--- Per-slice ---
+
+
+--- Per-strategy (all rows, all slices) ---
+
+
+--- Per-strategy x per-slice (top interactions) ---
+
+
+--- Per-category, top 15 by average replacements (n_exists >= 5) ---
+
+
+--- Categories BELOW F1_correct = 0.95 (n_exists >= 5, top 20) ---
+
+
+--- Category counts ---
+  Total distinct categories:                                 0
+  Meeting F1_correct >= 0.95 (n_exists >= 5):               0
+  Below F1_correct 0.95 (the "wrong parts" problem):         0
+
+--- Files ---
+  by-category: /home/runner/work/ifritah-parts/ifritah-parts/qa-quality-by-category-2026-08-27_1345.csv
+  by-system:   /home/runner/work/ifritah-parts/ifritah-parts/qa-quality-by-system-2026-08-27_1345.csv
+  by-slice:    /home/runner/work/ifritah-parts/ifritah-parts/qa-quality-by-slice-2026-08-27_1345.csv
+  failures:    /home/runner/work/ifritah-parts/ifritah-parts/qa-quality-failures-2026-08-27_1345.csv
