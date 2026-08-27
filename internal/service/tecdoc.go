@@ -206,6 +206,74 @@ func (t *TecDoc) SearchByOEMIndex(oemNumber string, limit int) ([]model.OEMRefer
 	return refs, nil
 }
 
+// FetchDataSupplierIds returns the dataSupplierId per legacyArticleId for
+// the requested article-id set, as a single batched IN-list query against
+// the `articles` table. Introduced by M3.S1.T1 to power the canonical-pick
+// tiebreak in the article-id promotion pipeline (see
+// docs/data-sources/article-id-promotion-diagnosis.md).
+//
+// Returned map only contains ids that resolved; missing ids (zero, negative,
+// or not present in `articles`) are silently dropped so the caller can treat
+// "missing" as "unknown supplier — score 0" without extra bookkeeping.
+//
+// dataSupplierId is the TecDoc supplier-registration id. Higher values are
+// suppliers who registered their catalog more recently — a rough proxy for
+// "canonical/current" when two articles compete for the same OEM. The
+// roadmap M3.S1.T1 calls this out explicitly as the tiebreak signal.
+//
+// Empty input returns (nil, nil). Fails loud on DB errors — the caller
+// tolerates missing tiebreak data (falls back to first-seen article id)
+// but should not silently ignore a real query failure.
+func (t *TecDoc) FetchDataSupplierIds(articleIds []int) (map[int]int, error) {
+	if t.db == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+	// Deduplicate + filter out non-positive ids in one pass so the
+	// IN-list stays compact even if the caller passed duplicates.
+	seen := make(map[int]bool, len(articleIds))
+	uniq := make([]int, 0, len(articleIds))
+	for _, id := range articleIds {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		uniq = append(uniq, id)
+	}
+	if len(uniq) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(uniq)-1) + "?"
+	q := fmt.Sprintf(`
+		SELECT legacyArticleId, COALESCE(dataSupplierId, 0)
+		FROM   articles
+		WHERE  legacyArticleId IN (%s)`, placeholders)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	args := make([]any, 0, len(uniq))
+	for _, id := range uniq {
+		args = append(args, id)
+	}
+
+	rows, err := logQueryCtx(t.db, ctx, "TecDoc.FetchDataSupplierIds", q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fetch data supplier ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[int]int, len(uniq))
+	for rows.Next() {
+		var id, supplier int
+		if err := rows.Scan(&id, &supplier); err != nil {
+			continue
+		}
+		out[id] = supplier
+	}
+	return out, nil
+}
+
 // SearchByKeyword uses the searchindex FULLTEXT index (5.8M rows) to find parts.
 func (t *TecDoc) SearchByKeyword(keyword string, limit int) ([]model.OEMReference, error) {
 	if limit <= 0 || limit > 100 {

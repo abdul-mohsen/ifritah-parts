@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -38,6 +39,231 @@ const enrichmentBudget = 10 * time.Second
 // call into 4 more slow calls.
 const perResultBudget = 2 * time.Second
 
+// promotionLayerLimit is the per-layer LIMIT passed to each of the three
+// article-id promotion sources. Five candidates is enough that the
+// canonical-pick tiebreak has something to compare on wide-hit OEMs
+// (Bosch/MANN/MAHLE all catalog the same Hyundai OEM) but small enough
+// that the IN-list in FetchDataSupplierIds stays under a dozen items.
+const promotionLayerLimit = 5
+
+// errNoPromotion is the sentinel returned by promoteArticleIds when every
+// source (SearchByOEM → SearchCrossReferences → SearchByOEMIndex) returned
+// zero refs. Callers should treat it as "no article-anchored enrichment
+// possible for this OEM" and continue with the un-promoted result. It is
+// NOT a hard error — the OEM string may still yield aftermarket
+// alternatives via FindAftermarketForOEM.
+var errNoPromotion = errors.New("article-id promotion: no candidates from oem_number / articlecrosses / oem_search_index")
+
+// oemPromoter is the injectable interface consulted by the chained
+// article-id promotion pipeline (M3.S1.T1). Production wiring is
+// smartSearchOEMPromoter which dispatches into SmartSearch.tecdoc +
+// SmartSearch.tecDocCrossRef; unit tests inject a stub with recorded call
+// counts (see enrichment_test.go).
+//
+// The three PromoteBy* methods mirror the three source tables:
+//
+//	PromoteByOEM             → oem_number (+ oem_search_index UNION inside)
+//	PromoteByCrossReferences → articlecrosses.oemNumberNormalized
+//	PromoteByOEMIndex        → oem_search_index.normalized (rescue path)
+//
+// FetchDataSupplierIds returns dataSupplierId per legacyArticleId so the
+// pipeline can pick the canonical article when a layer returns multiple
+// candidates (roadmap M3.S1.T1 tiebreak signal).
+type oemPromoter interface {
+	PromoteByOEM(oem string, limit int) ([]model.OEMReference, error)
+	PromoteByCrossReferences(oem string, limit int) ([]model.OEMReference, error)
+	PromoteByOEMIndex(oem string, limit int) ([]model.OEMReference, error)
+	FetchDataSupplierIds(articleIds []int) (map[int]int, error)
+}
+
+// smartSearchOEMPromoter is the production adapter binding SmartSearch's
+// TecDoc + TecDocCrossRef fields to the oemPromoter interface. Constructed
+// per enrichResults call rather than cached on SmartSearch because the
+// underlying services can be nil in offline / partial-DB configurations,
+// and we want each call to consult the CURRENT s.tecdoc / s.tecDocCrossRef
+// state (the SetTecDoc* setters can rewire mid-lifecycle).
+type smartSearchOEMPromoter struct {
+	tecdoc   *TecDoc
+	crossRef *TecDocCrossRef
+}
+
+func (p *smartSearchOEMPromoter) PromoteByOEM(oem string, limit int) ([]model.OEMReference, error) {
+	if p == nil || p.tecdoc == nil {
+		return nil, nil
+	}
+	return p.tecdoc.SearchByOEM(oem, limit)
+}
+
+func (p *smartSearchOEMPromoter) PromoteByCrossReferences(oem string, limit int) ([]model.OEMReference, error) {
+	if p == nil || p.crossRef == nil {
+		return nil, nil
+	}
+	return p.crossRef.SearchCrossReferences(oem, limit)
+}
+
+func (p *smartSearchOEMPromoter) PromoteByOEMIndex(oem string, limit int) ([]model.OEMReference, error) {
+	if p == nil || p.tecdoc == nil {
+		return nil, nil
+	}
+	return p.tecdoc.SearchByOEMIndex(oem, limit)
+}
+
+func (p *smartSearchOEMPromoter) FetchDataSupplierIds(articleIds []int) (map[int]int, error) {
+	if p == nil || p.tecdoc == nil {
+		return nil, nil
+	}
+	return p.tecdoc.FetchDataSupplierIds(articleIds)
+}
+
+// promoteArticleIds is the chained-fallback article-id promotion pipeline
+// (M3.S1.T1). Given an OEM string, consults three sources in order and
+// returns the canonical article id plus the deduplicated ref set of the
+// FIRST successful layer.
+//
+// Fast-path semantics: when layer 1 returns any refs, layers 2 and 3 are
+// NOT called. This is by design — see
+// docs/data-sources/article-id-promotion-diagnosis.md for the
+// fallthrough-vs-UNION trade-off analysis. The short version:
+//   - layer 1 (oem_number) is the highest-quality signal — trust it when
+//     it hits.
+//   - layer 3 (oem_search_index) is a subset of layer 1 in the happy path
+//     (SearchByOEM unions both internally), so calling it unconditionally
+//     would double-hit the same table.
+//   - the DoD is a promotion RATE lift, not maximum-candidate recall.
+//
+// The canonical pick applies INSIDE the winning layer: if layer 1 returns
+// five distinct article ids (Bosch / MANN / MAHLE / Denso / Valeo all
+// catalog the same Hyundai OEM), we pick the id whose row in `articles`
+// has the highest dataSupplierId (proxy for most-recently-cataloged, hence
+// most-authoritative). Single-candidate layers skip the DB round-trip.
+//
+// Returns (bestArticleId, deduplicatedRefs, nil) on success. Returns
+// (0, nil, errNoPromotion) when every source returned zero refs. Ctx
+// cancellation between layers surfaces as (0, nil, ctx.Err()).
+//
+// Errors from individual layer calls are LOGGED but not fatal — the
+// pipeline moves on to the next layer, matching the pre-M3 inline
+// behavior. This is a soft-fail design: a MySQL blip on articlecrosses
+// shouldn't kill enrichment when oem_search_index is still available.
+func promoteArticleIds(ctx context.Context, p oemPromoter, oem string, perLayerLimit int) (int, []model.OEMReference, error) {
+	if p == nil || oem == "" {
+		return 0, nil, errNoPromotion
+	}
+
+	// Table-driven layer list — keeps the fallthrough loop compact and
+	// makes the log labels stable for post-hoc audit.
+	layers := []struct {
+		name string
+		call func(string, int) ([]model.OEMReference, error)
+	}{
+		{"oem_number", p.PromoteByOEM},
+		{"articlecrosses", p.PromoteByCrossReferences},
+		{"oem_search_index", p.PromoteByOEMIndex},
+	}
+
+	for _, layer := range layers {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+
+		refs, err := layer.call(oem, perLayerLimit)
+		if err != nil {
+			log.Printf("[promoteArticleIds] layer=%s oem=%q err=%v (continuing)", layer.name, oem, err)
+			continue
+		}
+		if len(refs) == 0 {
+			continue
+		}
+
+		// Layer produced candidates. Dedupe + canonical-pick, return.
+		deduped := dedupeOEMRefsByArticleId(refs)
+		best := pickCanonicalArticleId(p, deduped)
+		if best == 0 {
+			// Layer returned only zero-id refs (raw cross-refs with no
+			// article match). Preserve them for OEMNumbers population
+			// but the caller sees articleId==0 and skips
+			// article-anchored enrichment — matches pre-M3 behavior.
+			return 0, deduped, nil
+		}
+		return best, deduped, nil
+	}
+
+	return 0, nil, errNoPromotion
+}
+
+// dedupeOEMRefsByArticleId collapses refs sharing the same LegacyArticleId,
+// preserving the first-seen entry. Refs with articleId <= 0 are kept
+// verbatim (they carry raw cross-reference data useful for OEMNumbers
+// display even when they don't resolve to a TecDoc article).
+func dedupeOEMRefsByArticleId(refs []model.OEMReference) []model.OEMReference {
+	if len(refs) == 0 {
+		return refs
+	}
+	seen := make(map[int]bool, len(refs))
+	out := make([]model.OEMReference, 0, len(refs))
+	for _, r := range refs {
+		if r.LegacyArticleId <= 0 {
+			out = append(out, r)
+			continue
+		}
+		if seen[r.LegacyArticleId] {
+			continue
+		}
+		seen[r.LegacyArticleId] = true
+		out = append(out, r)
+	}
+	return out
+}
+
+// pickCanonicalArticleId chooses the "canonical" article id when a
+// promotion layer returned multiple distinct candidates. Signal is
+// `articles.dataSupplierId` — the TecDoc supplier-registration id (higher
+// = more recent supplier catalog entry, per the roadmap M3.S1.T1 spec).
+//
+// Zero-candidate refs → 0 (caller treats as "no promotion possible").
+// Single-candidate refs → that id (no DB round-trip).
+// Multi-candidate refs → batch-fetch supplier ids, return the highest.
+// Ties → first-seen wins (stable across identical requests once the
+// deduped slice is stable).
+//
+// FetchDataSupplierIds failure is treated as "no tiebreak available" —
+// falls back to the first-seen id rather than surfacing the DB error,
+// because the caller's contract is "give me the best id you can" not
+// "fail if the tiebreak query failed".
+func pickCanonicalArticleId(p oemPromoter, refs []model.OEMReference) int {
+	ids := make([]int, 0, len(refs))
+	for _, r := range refs {
+		if r.LegacyArticleId > 0 {
+			ids = append(ids, r.LegacyArticleId)
+		}
+	}
+	if len(ids) == 0 {
+		return 0
+	}
+	if len(ids) == 1 {
+		return ids[0]
+	}
+
+	supplierByArt, err := p.FetchDataSupplierIds(ids)
+	if err != nil || len(supplierByArt) == 0 {
+		if err != nil {
+			log.Printf("[pickCanonicalArticleId] FetchDataSupplierIds err=%v — falling back to first-seen id=%d", err, ids[0])
+		}
+		return ids[0]
+	}
+
+	bestID := ids[0]
+	bestSupplier := supplierByArt[bestID] // zero if not in map
+	for _, id := range ids[1:] {
+		s := supplierByArt[id]
+		if s > bestSupplier {
+			bestID = id
+			bestSupplier = s
+		}
+	}
+	return bestID
+}
+
 // enrichedResult is what a single result-goroutine returns to the collect
 // loop. Using a channel + collect-loop drain (rather than wg.Wait() + a
 // shared enriched slice) is what makes ctx-timeout non-blocking: if the
@@ -64,10 +290,11 @@ type enrichedResult struct {
 //
 //	(2) results with LegacyArticleId == 0 (from prefix_inference,
 //	    dealer_lookup, cache, and any online scrape)
-//	    → promote via TecDoc.SearchByOEM(articleNumber) which resolves the
-//	      OEM string to one or more TecDoc articleIds. Use the FIRST match
-//	      to run the same enrichment cascade. Also populate
-//	      AftermarketAlternatives from TecDoc.FindAftermarketForOEM.
+//	    → promote via the chained article-id pipeline (M3.S1.T1):
+//	      SearchByOEM → SearchCrossReferences → SearchByOEMIndex, with
+//	      canonical-pick by dataSupplierId when a layer returns multiple
+//	      candidates. Also populate AftermarketAlternatives from
+//	      TecDoc.FindAftermarketForOEM.
 //
 // Timeout model (see 2026-08-22 audit for the bug this replaces):
 //
@@ -108,6 +335,14 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 	resultCh := make(chan enrichedResult, len(results))
 	var wg sync.WaitGroup
 
+	// Build the article-id promoter once, share across all per-result
+	// goroutines. Adapter is a plain pointer struct — no locking, no
+	// allocation per goroutine. Callers with fully-nil TecDoc wiring
+	// still get a valid promoter; every PromoteBy* returns (nil, nil)
+	// in that case, matching the old behavior where the inline block
+	// was gated by `s.tecdoc != nil` at each layer.
+	promoter := &smartSearchOEMPromoter{tecdoc: s.tecdoc, crossRef: s.tecDocCrossRef}
+
 	for i, orig := range results {
 		wg.Add(1)
 		go func(idx int, enriched SmartResult) {
@@ -130,66 +365,28 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			}
 
 			// Resolve an articleId to enrich against. If the result came
-			// from a TecDoc-anchored strategy, we already have one. If it
-			// came from prefix_inference / dealer_lookup / cache, we look
-			// it up by OEM string.
+			// from a TecDoc-anchored strategy, we already have one. If
+			// it came from prefix_inference / dealer_lookup / cache, we
+			// look it up by OEM string via the chained article-id
+			// promotion pipeline (M3.S1.T1). errNoPromotion means "no
+			// article-anchored enrichment for this OEM" but aftermarket
+			// alternatives still run below (they're OEM-keyed, not
+			// articleId-keyed).
 			articleId := enriched.LegacyArticleId
 			oem := enriched.Part.ArticleNumber
 
-			if articleId == 0 && oem != "" && s.tecdoc != nil && budgetLeft() {
-				// Primary: oem_number table (sparse HK coverage — ~5% of real HK
-				// OEMs per the 2026-08-23 quality audit).
-				refs, err := s.tecdoc.SearchByOEM(oem, 5)
-				if err == nil && len(refs) > 0 {
-					for _, ref := range refs {
-						if ref.LegacyArticleId > 0 {
-							articleId = ref.LegacyArticleId
-							break
-						}
-					}
+			if articleId == 0 && oem != "" && budgetLeft() {
+				bestID, refs, err := promoteArticleIds(ctx, promoter, oem, promotionLayerLimit)
+				if err != nil && !errors.Is(err, errNoPromotion) {
+					// ctx.Err() or some non-sentinel error. Not fatal —
+					// aftermarket path below still runs on the raw OEM.
+					log.Printf("[enrichResults] promoteArticleIds oem=%q err=%v", oem, err)
+				}
+				if bestID > 0 {
+					articleId = bestID
+				}
+				if len(refs) > 0 {
 					enriched.OEMNumbers = append(enriched.OEMNumbers, refs...)
-				}
-
-				// Fallback: articlecrosses via SearchCrossReferences. The
-				// 2026-08-23 quality audit found 0% CompatibleVehicles + 2.5%
-				// Specs coverage because SearchByOEM returned 0 refs 74% of
-				// the time, leaving articleId=0 and skipping all
-				// article-anchored enrichment. articlecrosses (30M rows,
-				// indexed by sql/06) has broader HK OEM coverage than
-				// oem_number (21.5M rows); when the primary path fails, try
-				// the cross-ref path before giving up on article-anchored
-				// enrichment.
-				if articleId == 0 && s.tecDocCrossRef != nil && budgetLeft() {
-					crossRefs, cerr := s.tecDocCrossRef.SearchCrossReferences(oem, 5)
-					if cerr == nil && len(crossRefs) > 0 {
-						for _, ref := range crossRefs {
-							if ref.LegacyArticleId > 0 {
-								articleId = ref.LegacyArticleId
-								break
-							}
-						}
-						enriched.OEMNumbers = append(enriched.OEMNumbers, crossRefs...)
-					}
-				}
-
-				// M3.S1.T1: third-level fallback via oem_search_index.
-				// When both the primary oem_number lookup AND the
-				// articlecrosses fallback return 0 refs, try the
-				// secondary index table PR #14 introduced. Some OEMs
-				// only appear here (fuzzy-match cross-refs cataloged
-				// against slightly different OEM strings). Reads via
-				// TecDoc.SearchByOEM's secondary path shape.
-				if articleId == 0 && s.tecdoc != nil && budgetLeft() {
-					idxRefs, ierr := s.tecdoc.SearchByOEMIndex(oem, 5)
-					if ierr == nil && len(idxRefs) > 0 {
-						for _, ref := range idxRefs {
-							if ref.LegacyArticleId > 0 {
-								articleId = ref.LegacyArticleId
-								break
-							}
-						}
-						enriched.OEMNumbers = append(enriched.OEMNumbers, idxRefs...)
-					}
 				}
 			}
 
@@ -214,7 +411,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 
 			// TecDoc-articleId-anchored enrichments — need a non-zero
 			// articleId either from the original result or from the
-			// SearchByOEM promotion above.
+			// promotion pipeline above.
 			if articleId <= 0 {
 				return
 			}
