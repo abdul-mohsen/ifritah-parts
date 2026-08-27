@@ -2,11 +2,6 @@
 
 Diagnostic SQL scripts you can run against qa (or any deployed env) to find why each broken strategy returns 0 hits, plus the ONE all-in-one TecDoc-health report that answers "what data actually exists in my MySQL". Results feed the M0 fix tasks in `docs/sprints/M0-fix-broken-strategies.md`.
 
-> **Prefer one-command engine-health check?** See
-> [`scripts/engine-health-check.md`](../engine-health-check.md) — orchestrates
-> the API quality audit + this diagnostic + a delta comparison into a single
-> combined report at `docs/reports/{date}-engine-health/summary.md`.
-
 ## Files
 
 | Task | Database | Script |
