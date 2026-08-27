@@ -1,8 +1,29 @@
 # Parts Engine Roadmap — from "search that returns something" to "the definitive Hyundai/Kia parts sourcing engine"
 
 **Owner:** search-quality
-**Status:** Living document — updated after every audit cycle
+**Status:** Living document - updated after every audit cycle
 **Baseline audit:** `docs/reports/2026-08-23-quality-audit/` (F1_correct = 0.30 overall, AvgRepl_correct = 0.20, F1_rich5 = 0.002)
+**Last state update:** 2026-08-27 — post TecDoc audit-diagnostic run + PRs #22-#27 merged.
+
+---
+
+## Current state at-a-glance (2026-08-27)
+
+| Milestone | Status | Evidence |
+|---|:-:|---|
+| **M0** Fix broken strategies (data discovery) | ✅ **DONE** | TecDoc diagnostic complete — sql/06+07+08 all applied and used; every hot query hits its index; aftermarket data confirmed present in TecDoc for HK OEMs (2026-08-27 baseline check) |
+| **M1** No wrong parts (correctness) | 🟢 **~90%** | PR #19 + #20 shipped HK-scope guard + strategyCategoryPenalty + widened deny-list; PR #21 (soft-penalty refinement) still open |
+| **M2** Rich alternatives (aftermarket) | 🟢 **Code done, awaits re-audit** | Multi-path UNION + brand normalization + tier-sort in PR #20; smart-search `mfrId` —>` dataSupplierId` fix in PR #27 + smart-search enrichAftermarket guard removed; needs 1490-corpus re-run to confirm `AvgAM_correct` climbs |
+| **M3** Full enrichment (specs / vehicles / supersession) | 🟢 **~90%** | sql/07 `legacyArticleId` + sql/08 `criteria_value` indexes applied; `SearchByOEMIndex` third-level promotion in PR #20; supersession-chain OEM AM fetch in PR #20 |
+| **M4** Beyond TecDoc (external data) | 🟡 **50%** | Backend + migrations shipped in PR #20 for RockAuto / regional / community; RockAuto scraper is skeleton-only (`--dry-run`); real scraper build ~3-4 weeks; M4.S3 dealer catalog blocked on partnership |
+| **M5** Search intelligence (semantic / VIN / related) | ✅ **DONE** | pgvector migration 000019, `/api/search/semantic`, `/api/vin/:vin/parts`, `/api/parts/related` all live in PR #20 |
+| **M6** Production-grade (audit CI / feedback / cost) | ✅ **DONE** | Nightly audit + PR quality gate + `/api/search/feedback` + cost meter all live in PR #20 |
+| **M7** AI/ML part-matching | ⚫ **Planned only** | Full 13-task plan doc merged in PR #27 (`docs/sprints/M7-ml-part-matching.md`); no code yet — depends on M8 producing training data |
+| **M8** Online-search aggregation | 🟢 **Core code + 41 sources wired** | Cache table + dispatcher + eBay + 40 G5 adapters + robots.txt guard + rate limiter all live in PR #27; adapters enabled by default, gated per-source via env; 5 sprints still deferred (schema.org tests + 3 G5 real fixtures + frontend badge) |
+
+**Overall completion vs 34-sprint total: ~65%** (5 milestones done or near-done; 3 in flight; 1 planned; 1 partial + externally-blocked).
+
+**Legend**: ✅ done · 🟢 near-done or in-flight · 🟡 partial · ⚫ planned only · 🔴 blocked
 
 ---
 
