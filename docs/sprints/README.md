@@ -20,6 +20,8 @@ Every task follows the template:
 | [`M3-enrichment.md`](M3-enrichment.md) | M3 — Full enrichment | 2 | 4 |
 | [`M4-data-sources.md`](M4-data-sources.md) | M4 — Beyond TecDoc | 4 | 10 |
 | [`M5-M6-intelligence-and-production.md`](M5-M6-intelligence-and-production.md) | M5 + M6 | 5 | 10 |
+| [`M7-ml-part-matching.md`](M7-ml-part-matching.md) | M7 — AI/ML part-matching engine | 4 | 13 |
+| [`M8-online-search-aggregation.md`](M8-online-search-aggregation.md) | M8 — Online-search aggregation (free/public sources for HK aftermarket) | 12 | 12 |
 
 ## Workflow
 

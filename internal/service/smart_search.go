@@ -101,22 +101,22 @@ func (s *SmartSearch) SetOEMCache(c *OEMCache) { s.oemCache = c }
 // SmartResult is an enhanced part result with confidence and cross-ref data.
 type SmartResult struct {
 	model.Part
-	Confidence              float64                    `json:"confidence"`
-	ConfidenceNote          string                     `json:"confidenceNote,omitempty"`
-	FitmentDriver           string                     `json:"fitmentDriver"`
-	OEMNumbers              []model.OEMReference       `json:"oemNumbers,omitempty"`
-	BrandResolved           string                     `json:"brand,omitempty"`
-	FitsVehicleCC           int                        `json:"fitsVehicleCC,omitempty"`
-	Substitutions           []model.SubstitutionPart   `json:"substitutions,omitempty"`
-	AftermarketAlternatives []model.AftermarketPart    `json:"aftermarketAlternatives,omitempty"`
-	Compatibility           []string                   `json:"compatibility,omitempty"`
+	Confidence              float64                  `json:"confidence"`
+	ConfidenceNote          string                   `json:"confidenceNote,omitempty"`
+	FitmentDriver           string                   `json:"fitmentDriver"`
+	OEMNumbers              []model.OEMReference     `json:"oemNumbers,omitempty"`
+	BrandResolved           string                   `json:"brand,omitempty"`
+	FitsVehicleCC           int                      `json:"fitsVehicleCC,omitempty"`
+	Substitutions           []model.SubstitutionPart `json:"substitutions,omitempty"`
+	AftermarketAlternatives []model.AftermarketPart  `json:"aftermarketAlternatives,omitempty"`
+	Compatibility           []string                 `json:"compatibility,omitempty"`
 	// S3: enrichment fields
-	Specifications      []model.Specification    `json:"specifications,omitempty"`
-	Documents           []model.Document         `json:"documents,omitempty"`
-	Supersession        *model.SupersessionChain `json:"supersession,omitempty"`
-	FunctionalEquivalents []model.OEMReference   `json:"functionalEquivalents,omitempty"`
-	CompatibleVehicles  []model.CompatibleVehicle `json:"compatibleVehicles,omitempty"`
-	SourceStrategy      string                   `json:"sourceStrategy,omitempty"`
+	Specifications        []model.Specification     `json:"specifications,omitempty"`
+	Documents             []model.Document          `json:"documents,omitempty"`
+	Supersession          *model.SupersessionChain  `json:"supersession,omitempty"`
+	FunctionalEquivalents []model.OEMReference      `json:"functionalEquivalents,omitempty"`
+	CompatibleVehicles    []model.CompatibleVehicle `json:"compatibleVehicles,omitempty"`
+	SourceStrategy        string                    `json:"sourceStrategy,omitempty"`
 }
 
 // SmartSearchResponse is the full smart search response.
@@ -909,8 +909,18 @@ func (s *SmartSearch) enrichAftermarket(resp *SmartSearchResponse) {
 			addParts(queryOEM)
 		}
 
-		// TecDoc full DB enrichment: oem_number → aftermarket articles
-		if s.tecdoc != nil && len(r.AftermarketAlternatives) == 0 {
+		// TecDoc full DB enrichment + M8 online-search dispatcher.
+		//
+		// Runs UNCONDITIONALLY (even when crossRef already returned rows).
+		// crossRef only queries `articlecrosses`; FindAftermarketForOEM
+		// runs 4 parallel paths — articlecrosses + oem_number +
+		// oem_search_index + OnlineSearch — and dedupes. Skipping this
+		// when crossRef was non-empty was a bug: it hid the online-search
+		// results (BOSCH/MANN/MAHLE from HyundaiPartsDeal / KiaPartsNow /
+		// PartsGeek / etc.) whenever articlecrosses had even one hit.
+		// The `existing` map (built at the top of this function) prevents
+		// duplicates.
+		if s.tecdoc != nil {
 			oems := []string{r.Part.ArticleNumber}
 			if queryOEM != "" && NormalizeOEM(queryOEM) != NormalizeOEM(r.Part.ArticleNumber) {
 				oems = append(oems, queryOEM)
@@ -929,9 +939,13 @@ func (s *SmartSearch) enrichAftermarket(resp *SmartSearchResponse) {
 						existing[key] = true
 					}
 				}
-				if len(r.AftermarketAlternatives) > 0 {
-					break
-				}
+				// NOTE: we intentionally do NOT break on first-hit here.
+				// Different OEMs (article number, query, cross-ref
+				// supersession chain) surface different aftermarket
+				// brands. FindAftermarketForOEM is cache-first (~10ms
+				// per repeat call for the same OEM) so the marginal
+				// cost of querying all variants is negligible; the
+				// coverage gain is real.
 			}
 		}
 	}

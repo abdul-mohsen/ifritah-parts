@@ -14,8 +14,15 @@ import (
 // TecDoc provides direct queries against the full TecDoc MySQL schema.
 // This is used when MySQL (dev_ifritah) is connected, giving access to
 // 651M vehicle-part linkages, 21.5M OEM numbers, and full cross-references.
+//
+// The optional `online` field is the M8 online-search dispatcher: when
+// wired, FindAftermarketForOEM runs a 4th UNION path against
+// aftermarket_online_cache (Postgres) with fall-through to eBay Motors
+// API and the G5 public-reference adapters. When nil (default),
+// FindAftermarketForOEM behaves as its M2.S1 3-path predecessor.
 type TecDoc struct {
-	db *sql.DB
+	db     *sql.DB
+	online *OnlineSearch
 }
 
 func NewTecDoc(db *sql.DB) *TecDoc {
@@ -23,6 +30,17 @@ func NewTecDoc(db *sql.DB) *TecDoc {
 		return nil
 	}
 	return &TecDoc{db: db}
+}
+
+// WithOnlineSearch wires the M8 online-search dispatcher into TecDoc so
+// FindAftermarketForOEM includes the online UNION path. Pass nil to
+// disable (equivalent to constructing TecDoc without ever calling this).
+// Returns the same *TecDoc for chaining.
+func (t *TecDoc) WithOnlineSearch(online *OnlineSearch) *TecDoc {
+	if t != nil {
+		t.online = online
+	}
+	return t
 }
 
 // ---------- OEM number search ----------
@@ -395,24 +413,34 @@ func (t *TecDoc) FindReplacements(legacyArticleId int) ([]model.SupersessionLink
 }
 
 // FindAftermarketForOEM returns aftermarket alternatives for an OEM number
-// by running THREE lookup paths in parallel and unioning the deduped
+// by running FOUR lookup paths in parallel and unioning the deduped
 // results. Each path has different HK coverage — the union catches parts
 // that only one path knows about.
 //
 //	Path 1: articlecrosses.oemNumberNormalized  - 30M rows, indexed by sql/06
 //	Path 2: oem_number.clean_number             - 21.5M rows, indexed by sql/06
 //	Path 3: oem_search_index.normalized         - PR #14 secondary xref
+//	Path 4: OnlineSearch dispatcher (M8)        - eBay Motors + G5 sites,
+//	                                              cache-first via
+//	                                              aftermarket_online_cache
 //
 // The 2026-08-23 quality audit found 6.7% aftermarket coverage when only
 // path 1 ran (post-PR-#20 rewrite). M2.S1.T1 adds paths 2 and 3 so the
 // data-sparse case where one path returns 0 while another returns rows
-// still yields a full aftermarket list.
+// still yields a full aftermarket list. M8.T11 adds path 4 to fill the
+// structural HK-aftermarket gap that the 2026-08-26 diagnostic surfaced.
+//
+// Path 4 is opt-in: when t.online is nil (default in tests, in
+// environments without the online cache Postgres connection, or when
+// ONLINE_SEARCH_ENABLED=false) the online path returns nil immediately
+// and the function behaves exactly as the M2.S1 3-path version.
 //
 // Dedup key: (NormalizeBrand(brand), lower(partNumber)) — so "BOSCH" /
 // "Bosch" / "Robert Bosch GmbH" collapse to one canonical entry.
 //
 // Per-path budget: 3s wall clock via ctx. If a path is slow, the others
-// still return what they have.
+// still return what they have. Online path has its own longer 8s
+// dispatcher budget internally, but the 3s ctx here caps overall wait.
 func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPart, error) {
 	clean := NormalizeOEM(oemNumber)
 	if clean == "" {
@@ -427,7 +455,7 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 		err   error
 		name  string
 	}
-	resultCh := make(chan pathResult, 3)
+	resultCh := make(chan pathResult, 4)
 
 	go func() {
 		p, err := t.findAftermarketFromArticlecrosses(ctx, clean)
@@ -441,11 +469,22 @@ func (t *TecDoc) FindAftermarketForOEM(oemNumber string) ([]model.AftermarketPar
 		p, err := t.findAftermarketFromOemSearchIndex(ctx, clean)
 		resultCh <- pathResult{p, err, "oem_search_index"}
 	}()
+	// Path 4 (M8): federated online-search dispatcher. Cache-first;
+	// falls back to eBay Motors API + G5 sites when the entry is stale
+	// or missing. Always safe when t.online == nil (production without
+	// the online cache DB connection).
+	pathCount := 3
+	if t.online != nil {
+		pathCount = 4
+		go func() {
+			resultCh <- pathResult{t.online.Search(ctx, clean), nil, "online"}
+		}()
+	}
 
 	seen := make(map[string]bool, 100)
 	var out []model.AftermarketPart
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < pathCount; i++ {
 		select {
 		case r := <-resultCh:
 			if r.err != nil {

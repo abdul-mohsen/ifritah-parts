@@ -31,6 +31,9 @@
 | Non-HK guard leaks | 38 of 100 | **≤ 2 of 100** |
 | Body / glass categories `F1_correct` | 0.00-0.15 | **≥ 0.90** (aftermarket N/A) |
 | Continuous audit passes on every PR | not enforced | required CI gate |
+| `AvgAM_inferred` on OEMs with zero direct aftermarket data | 0 | **≥ 3** (M7) |
+| Ranker nDCG@5 on held-out feedback set | not measured | **≥ 0.75** (M7) |
+| NL-query parser field-recall on parts-seller logs | not measured | **≥ 0.90** (M7) |
 
 ---
 
@@ -47,10 +50,12 @@ Each milestone ships a measurable slice of the north-star. Every milestone ends 
 | M4 | **Beyond TecDoc** — RockAuto + regional supplier + dealer + community | AvgAM adds +3 from non-TecDoc sources; F1_correct on body/glass ≥ 0.90 | 4 |
 | M5 | **Search intelligence** — semantic, VIN, cross-suggest | VIN → parts F1 ≥ 0.80; description-similarity recall + 10 pts on unseeded slice | 3 |
 | M6 | **Production-grade** — continuous audit CI, feedback loop, cost SLA | Every PR blocked if F1_correct regresses; p95 ≤ 3 s; monthly cost audit | 2 |
+| M7 | **AI/ML part-matching engine** — analogical inference, cross-brand mapping, feedback-trained ranker | AvgAM_inferred ≥ 3 on OEMs with zero direct TecDoc aftermarket data; ranker recall@5 +15 pts on unseeded | 4 |
+| M8 | **Online-search aggregation** — free/public sources meta-search + cache for HK aftermarket | `AvgAM_online` ≥ 3 aftermarket brands per corpus OEM at $0 committed spend | 12 |
 
-Total: **18 sprints** (~8-11 months at 1 sprint / 2 weeks).
+Total: **34 sprints** (~12-15 months at 1 sprint / 2 weeks).
 
-**Merge order matters.** M0 unblocks the strategies that M2 (`supersession` walker), M3 (`vehicle_fitment` for vehicle enrichment), and M5 (`vin_assembly`) will build on. Skip M0 and the later milestones are building on broken foundations.
+**Merge order matters.** M0 unblocks the strategies that M2 (`supersession` walker), M3 (`vehicle_fitment` for vehicle enrichment), and M5 (`vin_assembly`) will build on. Skip M0 and the later milestones are building on broken foundations. **M7 depends on M0-M6** — the ML engine trains on the artifacts produced by the earlier milestones (audit CSVs, feedback events, aftermarket rows from M4). **M8** is the free/public-source aftermarket fill; it can run in parallel with M0-M6 code fixes but its exit gate depends on Wave-2 code fixes (`mfrId` bug, sql/08) being live in prod. M8 also produces the training signal M7 depends on (`aftermarket_online_cache` rows).
 
 ---
 
@@ -327,6 +332,105 @@ Total: **18 sprints** (~8-11 months at 1 sprint / 2 weeks).
   - **Files:** `internal/service/cost_meter.go`
   - **DoD:** cost dashboard in Grafana / equivalent
   - **Effort:** L
+
+---
+
+## M7 — AI/ML part-matching engine
+
+**Problem statement.** Even after M0-M4 finish, structural data gaps remain: TecDoc has ~30M cross-refs but essentially zero aftermarket-brand rows for Hyundai/Kia OEMs (the 2026-08-26 TecDoc-health diagnostic confirmed: the top 30 brands on HK cross-refs are all car OEMs, no BOSCH/MANN/MAHLE/DENSO). RockAuto + regional catalogs (M4) close some of the gap but still leave long-tail OEMs unmatched.
+
+M7 uses machine learning to **infer** cross-references and rank aftermarket alternatives that are not stored anywhere as a direct row. It builds on the artifacts already produced by M0-M6:
+
+- **30 M `articlecrosses` rows** — training gold for cross-brand OEM equivalence
+- **27 M `articlecriteria` rows** — spec vectors per part
+- **340 M `articlesvehicletrees` rows** — vehicle-fitment co-occurrence signal
+- **`article_embeddings` from M5.S1** — 384-dim semantic vectors on descriptions
+- **`search_feedback` from M6.S2** — thumbs-up / -down implicit relevance signal
+- **`aftermarket_rockauto` + `aftermarket_community` from M4** — external ground-truth for HK aftermarket coverage
+
+### Sprint M7.S1 — Analogical OEM inference (nearest-neighbor cross-brand)
+
+**Goal:** For an HK OEM with zero direct aftermarket data, find the "nearest-neighbor" OEM from a brand that DOES have aftermarket coverage (e.g. a Toyota oil filter with the same specs) and surface its aftermarket brands as inferred alternatives.
+
+- **Task M7.S1.T1** — Build a `part_vectors` table: for every article, concatenate `(dataSupplierId, assemblyGroupNodeId, top-N criteria as a sparse vector, description embedding)` into a 512-dim vector. Store in pgvector.
+  - **Files:** new `db/migrations/000040_part_vectors.sql`, new `cmd/build_part_vectors/`
+  - **DoD:** 6.9 M rows populated; IVFFlat index built; median build time <2 h
+  - **Effort:** L
+- **Task M7.S1.T2** — `FindAftermarketByAnalogy(oem)` service. When primary + multi-path UNION returns fewer than 3 real aftermarket brands, run: (1) look up the OEM's article vector; (2) k-NN search for top-20 nearest articles across all brands; (3) union their aftermarket cross-refs; (4) tag results as `source=analogy` with a confidence score derived from cosine similarity.
+  - **Files:** new `internal/service/analogy_matcher.go`, wire into `tecdoc.go:FindAftermarketForOEM_MultiPath`
+  - **DoD:** on 50 seeded HK OEMs known to have zero direct aftermarket rows, at least 30 return ≥ 3 inferred aftermarket brands with cosine ≥ 0.85
+  - **Effort:** L
+- **Task M7.S1.T3** — UI badge + per-result confidence. Analogy hits render with a `Inferred (85% match)` badge so the parts seller understands provenance.
+  - **Files:** `frontend/src/components/PartResult.tsx`
+  - **DoD:** badge shows for source=analogy; unit tests cover the render
+  - **Effort:** S
+
+### Sprint M7.S2 — Learned ranker (feedback-trained)
+
+**Goal:** Replace the hand-tuned strategy priority weights (`strategy.go:strategyPriority`) with a learned ranker that optimises for user-observed relevance (feedback thumbs + click-throughs).
+
+- **Task M7.S2.T1** — Feature-engineering pipeline. For every `(query_oem, result_article)` pair in the last 90 days of `search_feedback`, compute features: strategy source, confidence, brand tier, category-system match, semantic distance, has-specs flag, has-vehicle-fitment flag, spec-match count. Land in `training_features` table.
+  - **Files:** new `cmd/build_training_set/`, new `db/migrations/000041_training_features.sql`
+  - **DoD:** ≥ 50 K feature rows generated; feature-store column-completeness > 95%
+  - **Effort:** M
+- **Task M7.S2.T2** — Train a LightGBM-based ranker. Objective: `LambdaRank` optimising nDCG@5. Hold out 20% for validation. Publish the model + feature-importances to `models/ranker-{date}.txt`.
+  - **Files:** new `scripts/train_ranker/train.py` (Python is fine — offline training is decoupled from the Go runtime)
+  - **DoD:** nDCG@5 on held-out set ≥ 0.75; feature-importance report attached to PR
+  - **Effort:** L
+- **Task M7.S2.T3** — In-Go inference. Load the LightGBM model via `leaves` (pure-Go LightGBM inference lib). Score every candidate result post-dedupe, before final sort. Add an A/B toggle `USE_ML_RANKER=true/false`.
+  - **Files:** new `internal/service/ml_ranker.go`; wire into `searchCombined`
+  - **DoD:** p95 latency impact <50 ms; toggle-off matches current behaviour byte-for-byte
+  - **Effort:** M
+- **Task M7.S2.T4** — Weekly retrain cron. Rebuild feature set + retrain + hot-swap model file. If nDCG@5 regresses on the held-out set, reject the new model and alert.
+  - **Files:** `.github/workflows/ml-ranker-retrain.yml`, `scripts/train_ranker/promote.py`
+  - **DoD:** cron runs weekly; regression rollback path exercised in dry-run
+  - **Effort:** M
+
+### Sprint M7.S3 — Spec-conditioned equivalence learning
+
+**Goal:** For wear parts (filters, pads, plugs) — the categories where a wrong spec means the part physically won't fit — train a classifier that predicts "these two OEMs are equivalent" using only their `articlecriteria` spec vectors. This lets the engine claim equivalence between an HK OEM and an aftermarket part that shares thread size, diameter, height, filter media, etc.
+
+- **Task M7.S3.T1** — Positive/negative pair mining from `articlecrosses`. For every existing cross-ref row, generate `(oem_A, oem_B, label=1)` positive pairs. Generate negatives by sampling `(oem_A, oem_random_same_category, label=0)` at 4:1 ratio. Land in `equivalence_training_pairs`.
+  - **Files:** new `cmd/mine_equivalence_pairs/`, new `db/migrations/000042_equivalence_training_pairs.sql`
+  - **DoD:** ≥ 500 K pairs generated; label balance verified
+  - **Effort:** M
+- **Task M7.S3.T2** — Train a siamese network on `part_vectors` (from M7.S1.T1). Output: probability that two parts are functionally equivalent. Architecture: 2-layer MLP with contrastive loss.
+  - **Files:** new `scripts/train_equivalence/train.py`
+  - **DoD:** AUROC on held-out pairs ≥ 0.92; false-positive rate <5% at operating threshold
+  - **Effort:** L
+- **Task M7.S3.T3** — In-Go equivalence-scorer. Given a query OEM + a candidate part, return equivalence probability. Callable from `searchCombined` to filter out low-probability candidates before final sort.
+  - **Files:** new `internal/service/equivalence_scorer.go`
+  - **DoD:** integrated behind `USE_ML_EQUIVALENCE=true` flag; wear-part F1_correct climbs by ≥ 5 pts on the canary
+  - **Effort:** M
+
+### Sprint M7.S4 — LLM query understanding + natural-language search
+
+**Goal:** Support free-text queries like *"oil filter for 2020 Sonata 2.4L"* or *"cheapest aftermarket brake pads for Elantra AD"* — currently the engine only accepts OEM numbers or VIN.
+
+- **Task M7.S4.T1** — LLM-driven query parser. Given free text, extract `(part_type, make, model, year, engine, brand_pref, tier_pref)`. Use a small model (Llama 3 8B or gpt-4o-mini) with structured-output constraint. Cache identical queries for 24h.
+  - **Files:** new `internal/service/nl_query_parser.go`, new `internal/service/llm_client.go`
+  - **DoD:** for 100 real-world natural-language queries from parts-seller logs, parser recall ≥ 0.90 on all extractable fields
+  - **Effort:** M
+- **Task M7.S4.T2** — Query-router: after parsing, dispatch to (a) VIN pipeline if VIN detected, (b) semantic search + vehicle-fitment JOIN if part_type + vehicle detected, (c) full-text fallback otherwise.
+  - **Files:** `internal/service/query_router.go`
+  - **DoD:** for 20 natural-language test queries, correct routing 20/20; nDCG@5 ≥ 0.70 vs a human-curated top-5
+  - **Effort:** M
+- **Task M7.S4.T3** — Explainability. Every result returned via NL query includes a one-line "why this?" attribution (matched via spec/VIN/analogy/etc.).
+  - **Files:** `frontend/src/components/PartResult.tsx`
+  - **DoD:** attribution renders for 100% of NL results; A/B trial shows +8 pts thumbs-up rate
+  - **Effort:** S
+
+**M7 exit gate:** re-audit — on the 50-OEM canary with zero direct aftermarket data, `AvgAM_inferred ≥ 3`; on the 1490-corpus audit, ranker-vs-heuristic A/B shows recall@5 +15 pts on the unseeded slice; NL-query nDCG@5 ≥ 0.70.
+
+### M7 risk register
+
+| Risk | Mitigation |
+|---|---|
+| Analogy inference returns wrong-category parts | Gate by `assemblyGroupNodeId` match (once M3 populates it) + cosine threshold ≥ 0.85 + label as "inferred" so seller can dismiss |
+| Learned ranker overfits to a narrow demographic of users | Weekly retrain with 90-day sliding window; nDCG regression rollback in the promote workflow |
+| LLM query parser hallucinates model years / trims | Structured-output JSON constraint; parser output validated against known NHTSA VIN patterns before dispatch |
+| Cost of embedding + LLM inference blows the $0.003/request SLA | Aggressive caching (identical NL queries 24h, embeddings 30d); fall back to keyword search when hot-path exceeds 200ms |
+| Serving stale models after data-source refresh | Model version stamped into every result; audit runs pinned to a specific model file |
 
 ---
 

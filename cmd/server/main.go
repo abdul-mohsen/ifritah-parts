@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,6 +210,28 @@ func main() {
 	if mysql != nil {
 		tecdoc = service.NewTecDoc(mysql)
 		if tecdoc != nil {
+			// ─── M8: wire the online-search dispatcher onto TecDoc ─────
+			// FindAftermarketForOEM will fan out to the online sources
+			// alongside its 3 TecDoc paths (articlecrosses / oem_number /
+			// oem_search_index). Cache-first read via Postgres
+			// aftermarket_online_cache; on miss the dispatcher parallel-
+			// queries every enabled source.
+			//
+			// Every source is ENABLED by default. To disable a specific
+			// source without a redeploy set ONLINE_<NAME>_ENABLED=false.
+			// Global kill switch: ONLINE_SEARCH_ENABLED=false disables
+			// the whole subsystem in one env var.
+			cacheRepo := service.NewAftermarketOnlineCacheRepo(pg)
+			robots := service.NewRobotsGuard(nil)
+			httpClient := &http.Client{Timeout: 8 * time.Second}
+			sources := append(
+				[]service.OnlineSource{service.NewEbayFinder(nil)},
+				service.AllG5Adapters(httpClient, robots)...,
+			)
+			online := service.NewOnlineSearch(cacheRepo, sources...)
+			tecdoc = tecdoc.WithOnlineSearch(online)
+			log.Printf("✓ Online-search dispatcher wired: %d sources (eBay + G5), all enabled by default; disable any via ONLINE_<SOURCE>_ENABLED=false", len(sources))
+
 			smartSearch.SetTecDoc(tecdoc)
 			// S2: articlecrosses cross-reference (30M rows)
 			smartSearch.SetTecDocCrossRef(service.NewTecDocCrossRef(mysql))
