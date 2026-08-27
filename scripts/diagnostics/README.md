@@ -20,18 +20,29 @@ Diagnostic SQL scripts you can run against qa (or any deployed env) to find why 
 
 ## How to run
 
-### `tecdoc_diagnostic_full.sql` — the ONE big audit + diagnostic
+### `tecdoc_diagnostic_full.sql` — the ONE optimized diagnostic
 
-Single self-contained file. Runs the whole TecDoc health check end-to-end in 6 parts (23 numbered sections total). Answers every question that gates M0-M8 progress without needing to chain multiple scripts together.
+Single self-contained file. Only contains queries that are **still unresolved** — every query whose answer was pinned on prior 2026-08-25 / 26 runs has been removed. Runs in **2-4 minutes** (was 2-8 min with the full 23-section version). Answers every question that still gates M0-M8 progress.
 
 **What it covers**
 
-- **Part A · Environment** — table sizes, schema, P0 index PASS/FAIL summary (sql/06 + sql/07 + sql/08 hotfix), articles/ambrand/articlecriteria column discovery, HK manufacturers + brand catalog
-- **Part B · HK data coverage** — oem_number, articlecrosses, articlecriteria, articlesvehicletrees linkingTargetType, supersession, vehicle catalog, language distribution
-- **Part C · The REAL aftermarket answer** — per-HK-prefix aftermarket brands via `articles.dataSupplierId → ambrand.brandId` (the correct JOIN, not `mfrId`) + explicit marquee-brand probe (BOSCH / MANN / MAHLE / DENSO / VALEO / HELLA / BREMBO / TEXTAR / FEBI / LEMFOERDER / LuK / INA / SKF / GATES / ContiTech / etc.)
-- **Part D · Corpus verification** — the 19 real HK OEMs from `scripts/audit/corpus-1500-v2.csv`: does each resolve? what aftermarket brands surface per OEM? what specs are populated?
-- **Part E · Sample rows** — spot-check the data shape
-- **Part F · EXPLAIN plans** — validates every index is actually used by the query planner
+- **Part A · sql/08 apply verification** — the P0 index PASS/FAIL summary. Re-runnable because it flips from `MISSING` to `PRESENT` once the operator applies `sql/08_articlecriteria_criteria_value_hotfix.sql`.
+- **Part B · Unresolved coverage** — `articlesvehicletrees` sampled distinct-linkage counts, supersession HK coverage (via memory-safe EXISTS pattern), HK vehicle catalog (Elantra + Sonata linkage IDs feeds audit corpus), language distribution
+- **Part C · THE aftermarket answer** — per-HK-prefix aftermarket brands via `articles.dataSupplierId → ambrand.brandId` (the correct JOIN, not the buggy `mfrId`) + explicit marquee-brand probe (BOSCH / MANN / MAHLE / DENSO / VALEO / HELLA / BREMBO / TEXTAR / FEBI / LEMFOERDER / etc.)
+- **Part D · 19-OEM corpus verification** — the audit corpus lookups: resolve rate via `oem_number`, brand diversity via `articlecrosses`, REAL aftermarket brand per corpus OEM, spec coverage per corpus OEM
+- **Part F · EXPLAIN plans** — validates every hot query hits its index (sql/06 + sql/07 + sql/08). Correlate with §A1 pass/fail.
+
+**Deliberately NOT re-run** (answered on 2026-08-25 / 26; agent memoises the results in its local notes):
+- Table sizes, exact row counts, index inventory
+- articlecrosses column list
+- articles / ambrand / articlecriteria schemas
+- HK manuIds + ambrand brand catalog
+- oem_number HK prefix distribution
+- articlecrosses HK prefix distribution
+- articlecriteria global spec distribution
+- articlesvehicletrees `linkingTargetType` distribution
+
+If the operator swaps the TecDoc dump for a different one, re-run the older full version (git history commit `5069e06:scripts/diagnostics/tecdoc_diagnostic_full.sql` — 23 sections).
 
 **Run it**
 
@@ -53,19 +64,19 @@ mysql> source scripts/diagnostics/tecdoc_diagnostic_full.sql;
 
 | | |
 |---|---|
-| Target runtime | 2-8 minutes on a healthy DB (all P0 indexes applied) |
-| Longer when | sql/07 or sql/08 indexes missing — EXPLAINs in Part F surface which one |
+| Target runtime | 2-4 minutes on a healthy DB (all P0 indexes applied) |
+| Longer when | sql/07 or sql/08 indexes missing — Part F EXPLAINs surface which |
 | Memory-safe | No `COUNT(DISTINCT)` over 340M rows; sampled estimates where full scans would fill /var/tmp |
 | Compatibility | MariaDB 10.3+ **AND** MySQL 5.7 / 8.x — no window functions, no `FORMAT=TREE`, no `JSON_TABLE`, no CTEs, no reserved-word column aliases |
-| Side effects | None. Every temp table is `TEMPORARY ... ENGINE=MEMORY` (session-scoped, auto-drop) |
+| Side effects | None. One `TEMPORARY ... ENGINE=MEMORY` table (session-scoped, auto-drop) |
 | Reads only | No `INSERT/UPDATE/DELETE` against user tables. No DDL against user tables. |
 
 Paste the full output back and I'll diagnose section-by-section:
-- whether sql/06 / sql/07 / sql/08 migrations are all applied (Part A §2c pass/fail summary)
-- whether the 19 audit-corpus OEMs actually resolve to data (Part D §15)
-- what REAL aftermarket brands exist for HK OEMs (Part C §12 + Part D §16b/c)
-- whether the language + `linkingTargetType='P'` filters eliminate data (Part B §8 + §11)
-- whether every hot query hits an index (Part F §18-§23)
+- whether sql/06 / sql/07 / sql/08 migrations are all applied (Part A §A1 pass/fail summary)
+- whether the 19 audit-corpus OEMs actually resolve to data (Part D §D2)
+- what REAL aftermarket brands exist for HK OEMs (Part C §C1-C2 + Part D §D4/D4b)
+- whether the language + `linkingTargetType='P'` filters eliminate data (Part B §B4)
+- whether every hot query hits an index (Part F §F1-§F6)
 
 ### Postgres queries (owned_catalog, catalog wiring)
 

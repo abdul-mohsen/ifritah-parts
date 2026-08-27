@@ -1,63 +1,37 @@
 -- ============================================================================
--- TecDoc Audit + Diagnostic — ALL-IN-ONE
+-- TecDoc Audit + Diagnostic — OPTIMIZED
 -- ============================================================================
--- One file. Runs the whole health check for the TecDoc MySQL / MariaDB
--- backend end-to-end. Answers every question that gates M0-M8 progress:
+-- Only queries that are still unresolved after the 2026-08-25 / 26 runs.
+-- Every query that had a successful answer on prior runs has been removed
+-- from this file — those answers are pinned in the local (non-repo) note:
 --
---   Part A · Environment
---     1.  Table sizes
---     2.  Schema + P0 index check (sql/06 + sql/07 + sql/08 hotfix)
---     3.  articles + ambrand + articlecriteria schemas (JOIN discovery)
---     4.  Hyundai/Kia manuIds + aftermarket-brand catalog
+--   C:\Users\ALMAAB~1\AppData\Local\Temp\opencode\tecdoc-known-answers\ANSWERED.md
 --
---   Part B · HK data coverage
---     5.  oem_number HK prefix coverage
---     6.  articlecrosses HK prefix coverage
---     7.  articlecriteria HK spec coverage
---     8.  articlesvehicletrees linkingTargetType distribution
---     9.  Supersession chain HK coverage
---     10. linkagetargets + modelseries HK vehicle catalog
---     11. Language distribution (validates lang='en' filter assumption)
+-- If the operator ever swaps the TecDoc dump for a different one, re-run
+-- the full historical file (in git history under commit 5069e06:
+-- `tecdoc_diagnostic_full.sql` — 23 sections) to re-establish the baseline.
 --
---   Part C · The real aftermarket answer
---     12. Aftermarket brands per HK prefix (via articles.dataSupplierId
---         → ambrand.brandId — the CORRECT JOIN, not mfrId which is 0)
---     13. Explicit marquee-brand probe (BOSCH / MANN / MAHLE / etc.)
+-- ─── What's IN this file ────────────────────────────────────────────
 --
---   Part D · Corpus verification
---     14. 19-OEM audit corpus via oem_number
---     15. 19-OEM audit corpus via articlecrosses
---     16. REAL aftermarket brand per corpus OEM
+--   Part A · sql/08 apply verification (still flips PRESENT after apply)
+--   Part B · vehicle-catalog + supersession + language (unresolved)
+--   Part C · THE aftermarket answer (via dataSupplierId — the whole point)
+--   Part D · 19-OEM corpus verification (never run)
+--   Part F · EXPLAIN plans (validates sql/06+sql/07+sql/08 index-hit)
 --
---   Part E · Sample data (spot-check)
---     17. Sample rows: articles / ambrand / oem_number / articlecrosses
+-- ─── What's OUT (already answered — in the local ANSWERED.md) ───────
 --
---   Part F · Query-plan verification
---     18. EXPLAIN FindBySpecMatch      (needs sql/08 index)
---     19. EXPLAIN FindSpecifications   (needs sql/07 legacyArticleId)
---     20. EXPLAIN SearchCrossReferences (needs sql/06 oemNumberNormalized)
---     21. EXPLAIN SearchByOEM primary   (needs sql/06 clean_number)
---     22. EXPLAIN PartsForVehicle       (uses linkingTargetId index)
---     23. EXPLAIN SearchByOEMIndex      (uses oem_search_index.normalized)
+--   Table sizes, exact row counts, index inventory, articlecrosses column
+--   list, articles/ambrand/articlecriteria schemas, HK manuIds, ambrand
+--   brand catalog, oem_number HK prefix distribution, articlecrosses HK
+--   prefix distribution, articlecriteria global spec distribution,
+--   articlesvehicletrees linkingTargetType distribution.
 --
--- ─── Runtime characteristics ─────────────────────────────────────────
+-- ─── Runtime ─────────────────────────────────────────────────────────
 --
---   * Total runtime: 2-8 minutes on a healthy database with all P0
---     indexes applied. Longer (up to 20 min) when sql/07 or sql/08
---     indexes are missing — the EXPLAINs at the end will surface that.
---
---   * Memory-safe: no COUNT(DISTINCT) over 340M rows; no LIMIT-inside-
---     IN-SELECT patterns; all subqueries bounded; sample-based
---     estimates where full scans would blow /var/tmp.
---
---   * Compatible: MariaDB 10.3+ AND MySQL 5.7 / 8.x. No window
---     functions, no FORMAT=TREE, no JSON_TABLE, no CTEs (portable to
---     older MariaDB), no reserved-word column aliases.
---
---   * Read-only: every DML/DDL that touches the DB is a TEMPORARY
---     table (auto-dropped at session end); ENGINE=MEMORY.
---
---   * No credentials in this file: pass creds via mysql client CLI.
+--   Estimated 2-4 minutes (was 2-8 min for the full file). Every query
+--   uses indexed equality or bounded LIMIT — no COUNT(DISTINCT) over
+--   340M rows, no LIMIT-inside-IN-SELECT that materializes huge lists.
 --
 -- ─── Usage ───────────────────────────────────────────────────────────
 --
@@ -66,109 +40,24 @@
 --         < scripts/diagnostics/tecdoc_diagnostic_full.sql \
 --         > tecdoc-diagnostic-$(date +%Y-%m-%d).txt
 --
--- Or interactively:
---
---   mysql> source scripts/diagnostics/tecdoc_diagnostic_full.sql;
---
--- Paste the full output back for section-by-section analysis.
+-- MariaDB 10.3+ AND MySQL 5.7 / 8.x compatible.
 -- ============================================================================
 
 
 SELECT '' AS ' ';
 SELECT '════════════════════════════════════════════════════════════════════════' AS ' ';
-SELECT '  TECDOC AUDIT + DIAGNOSTIC — ALL-IN-ONE' AS ' ';
+SELECT '  TECDOC DIAGNOSTIC — OPTIMIZED (unresolved queries only)' AS ' ';
 SELECT '  Run at:' AS ' ', NOW() AS run_at;
 SELECT '  Database:' AS ' ', DATABASE() AS db;
-SELECT '  Server:' AS ' ', @@version AS mysql_version, @@version_compile_os AS os;
 SELECT '════════════════════════════════════════════════════════════════════════' AS ' ';
 SELECT '' AS ' ';
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
---                       PART A — ENVIRONMENT SCAN
+--         PART A — P0 index PASS/FAIL (re-runnable — flips after sql/08)
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- ─── §1  Table sizes ─────────────────────────────────────────────────────
---
--- Sanity-check that TecDoc data is present at all. Any table showing 0
--- rows means either the dump wasn't loaded, the wrong DB is connected,
--- or a table was renamed in the source schema.
-
-SELECT '─── §1  Table sizes ────────────────────────────────────' AS section;
-
-SELECT
-	TABLE_NAME,
-	TABLE_ROWS                                          AS approx_rows,
-	ROUND(DATA_LENGTH  / 1024 / 1024, 1)                AS data_mb,
-	ROUND(INDEX_LENGTH / 1024 / 1024, 1)                AS index_mb
-FROM information_schema.tables
-WHERE table_schema = DATABASE()
-  AND table_name IN (
-	'articles','articlecrosses','articlecriteria','oem_number',
-	'oem_search_index','articlesvehicletrees','linkagetargets',
-	'modelseries','manufacturers','ambrand',
-	'replacedbyarticles','replacesarticles',
-	'assemblygroupnodenames','assemblygroupnodes'
-  )
-ORDER BY TABLE_ROWS DESC;
-
-SELECT '─── §1b Exact row counts (slower but authoritative) ────' AS section;
-
-SELECT 'articles'                AS tbl, COUNT(*) AS rows_exact FROM articles
-UNION ALL SELECT 'articlecrosses',       COUNT(*) FROM articlecrosses
-UNION ALL SELECT 'articlecriteria',      COUNT(*) FROM articlecriteria
-UNION ALL SELECT 'oem_number',           COUNT(*) FROM oem_number
-UNION ALL SELECT 'oem_search_index',     COUNT(*) FROM oem_search_index
-UNION ALL SELECT 'linkagetargets',       COUNT(*) FROM linkagetargets
-UNION ALL SELECT 'modelseries',          COUNT(*) FROM modelseries
-UNION ALL SELECT 'manufacturers',        COUNT(*) FROM manufacturers
-UNION ALL SELECT 'ambrand',              COUNT(*) FROM ambrand
-UNION ALL SELECT 'replacedbyarticles',   COUNT(*) FROM replacedbyarticles
-UNION ALL SELECT 'replacesarticles',     COUNT(*) FROM replacesarticles;
-
-
--- ─── §2  Schema + P0 index check ─────────────────────────────────────────
---
--- Verifies the three P0 index migrations are applied:
---   sql/06 → articlecrosses.oemNumberNormalized generated column + BTREE
---         → oem_number.clean_number BTREE index
---   sql/07 → articlecriteria (legacyArticleId) + (criteriaDescription, rawValue)
---   sql/08 → hotfix that adds sql/07's second index with prefix lengths
---            for the TEXT columns (was blocked by ERROR 1170)
-
-SELECT '─── §2  Schema — articlecrosses columns ──────────────' AS section;
-
-SELECT
-	COLUMN_NAME,
-	DATA_TYPE,
-	IS_NULLABLE,
-	IS_GENERATED,
-	LEFT(GENERATION_EXPRESSION, 80) AS gen_expr_first_80
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'articlecrosses'
-ORDER BY ORDINAL_POSITION;
-
-SELECT '─── §2b Index inventory across every table the app touches ──' AS section;
-
-SELECT
-	TABLE_NAME,
-	INDEX_NAME,
-	NON_UNIQUE,
-	GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS `columns`,
-	INDEX_TYPE
-FROM information_schema.statistics
-WHERE table_schema = DATABASE()
-  AND table_name IN (
-	'articles','articlecrosses','articlecriteria','oem_number',
-	'oem_search_index','articlesvehicletrees','linkagetargets',
-	'modelseries','manufacturers','ambrand',
-	'replacedbyarticles','replacesarticles'
-  )
-GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE, INDEX_TYPE
-ORDER BY TABLE_NAME, INDEX_NAME;
-
-SELECT '─── §2c P0 index PASS/FAIL summary ─────────────────────' AS section;
+SELECT '─── §A1 P0 index PASS/FAIL summary ───────────────────' AS section;
 
 SELECT
 	'articlecrosses.oemNumberNormalized (column)' AS check_name,
@@ -212,221 +101,17 @@ UNION ALL SELECT
 	) THEN 'PRESENT' ELSE 'MISSING (sql/08 hotfix needed)' END;
 
 
--- ─── §3  articles + ambrand + articlecriteria schema discovery ───────────
---
--- Documents the actual column layout. Two purposes:
---   * Confirms the mfrId=0 finding from 2026-08-26 that made us pivot
---     from articles.mfrId → articles.dataSupplierId as the ambrand link
---   * Reveals whether articlecriteria uses TEXT (which requires prefix
---     length in indexes → sql/07 vs sql/08 fix)
-
-SELECT '─── §3  articles table schema ─────────────────────────' AS section;
-
-SELECT
-	COLUMN_NAME,
-	DATA_TYPE,
-	IS_NULLABLE,
-	COLUMN_KEY,
-	COLUMN_COMMENT
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'articles'
-ORDER BY ORDINAL_POSITION;
-
-SELECT '─── §3b articles sample rows (verify mfrId is 0) ───────' AS section;
-
-SELECT *
-FROM articles
-LIMIT 3;
-
-SELECT '─── §3c ambrand table schema ──────────────────────────' AS section;
-
-SELECT
-	COLUMN_NAME,
-	DATA_TYPE,
-	IS_NULLABLE,
-	COLUMN_KEY
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'ambrand'
-ORDER BY ORDINAL_POSITION;
-
-SELECT '─── §3d ambrand sample (aftermarket brand catalog) ────' AS section;
-
-SELECT *
-FROM ambrand
-WHERE lang = 'EN'
-LIMIT 10;
-
-SELECT '─── §3e articlecriteria columns + index-prefix implications ──' AS section;
-
-SELECT
-	COLUMN_NAME,
-	DATA_TYPE,
-	CHARACTER_MAXIMUM_LENGTH,
-	IS_NULLABLE,
-	COLUMN_KEY,
-	CASE
-		WHEN DATA_TYPE IN ('text','mediumtext','longtext','tinytext','blob') THEN 'NEEDS_PREFIX'
-		WHEN DATA_TYPE IN ('varchar','char') THEN 'DIRECT_INDEXABLE'
-		ELSE 'N/A'
-	END AS index_treatment
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'articlecriteria'
-ORDER BY ORDINAL_POSITION;
-
-SELECT '─── §3f replacedbyarticles + replacesarticles schemas ──' AS section;
-
-SELECT
-	TABLE_NAME,
-	COLUMN_NAME,
-	DATA_TYPE
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name IN ('replacedbyarticles', 'replacesarticles')
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-
-
--- ─── §4  HK manufacturers + aftermarket brand catalog ────────────────────
-
-SELECT '─── §4  Hyundai/Kia/Genesis in manufacturers table ────' AS section;
-
-SELECT
-	manuId,
-	manuName,
-	linkingTargetType
-FROM manufacturers
-WHERE manuName LIKE '%Hyundai%'
-   OR manuName LIKE '%Kia%'
-   OR manuName LIKE '%Mobis%'
-   OR manuName LIKE '%Genesis%'
-ORDER BY manuName, linkingTargetType;
-
-SELECT '─── §4b Top aftermarket brands present in ambrand ─────' AS section;
-
-SELECT
-	brandName,
-	COUNT(*) AS rows_in_ambrand
-FROM ambrand
-WHERE brandName IN (
-	'BOSCH','MANN','MANN-FILTER','MAHLE','MAHLE ORIGINAL','KNECHT',
-	'DENSO','NGK','VALEO','HELLA','BREMBO','TEXTAR','FERODO','SACHS',
-	'FEBI','FEBI BILSTEIN','LEMFOERDER','LUK','INA','SKF','GATES',
-	'CONTINENTAL','FILTRON','WIX','PURFLUX','MAGNETI MARELLI',
-	'DELPHI','MEYLE','TRW','ATE','ZIMMERMANN','BLUE PRINT','KYB',
-	'MONROE','BILSTEIN','KONI','CHAMPION','MOBIS'
-  )
-GROUP BY brandName
-ORDER BY rows_in_ambrand DESC;
-
-
 -- ═══════════════════════════════════════════════════════════════════════════
---                    PART B — HK DATA COVERAGE
+--         PART B — Unresolved coverage: vehicle-catalog / supersession /
+--                  language (never answered on prior runs)
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- ─── §5  oem_number HK prefix coverage ────────────────────────────────────
+-- ─── §B1 articlesvehicletrees sampled distinct-linkage stats ─────────
 --
--- Primary lookup path. The app queries oem_number.clean_number for a
--- known HK OEM; results here directly gate how many audit-corpus OEMs
--- resolve.
+-- The full COUNT(DISTINCT linkingTargetId) over 340M rows blew /var/tmp
+-- on the v1 followup run. Bounded 10M-row sample keeps temp <40 MB.
 
-SELECT '─── §5  oem_number total + prefix-2 diversity ─────────' AS section;
-
-SELECT
-	COUNT(*)                              AS total_rows,
-	COUNT(DISTINCT LEFT(clean_number, 2)) AS distinct_prefix2
-FROM oem_number;
-
-SELECT '─── §5b oem_number rows per HK prefix ──────────────────' AS section;
-
-SELECT
-	LEFT(clean_number, 2) AS prefix2,
-	COUNT(*)              AS rows_at_prefix
-FROM oem_number
-WHERE LEFT(clean_number, 2) IN
-	('26','28','29','51','52','54','55','58','82','83','84','85','86',
-	 '92','93','94','95','96','97','98','99')
-GROUP BY prefix2
-ORDER BY rows_at_prefix DESC;
-
-
--- ─── §6  articlecrosses HK prefix coverage ────────────────────────────────
-
-SELECT '─── §6  articlecrosses.oemNumberNormalized presence ───' AS section;
-
-SELECT
-	'articlecrosses.oemNumberNormalized' AS check_name,
-	COUNT(*)                             AS matched
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = 'articlecrosses'
-  AND column_name = 'oemNumberNormalized';
-
-SELECT '─── §6b articlecrosses HK-prefix cross-ref counts ──────' AS section;
-
-SELECT
-	LEFT(oemNumberNormalized, 2) AS prefix2,
-	COUNT(*)                     AS crossref_rows,
-	COUNT(DISTINCT brandName)    AS distinct_brands
-FROM articlecrosses
-WHERE oemNumberNormalized LIKE '26%'
-   OR oemNumberNormalized LIKE '58%'
-   OR oemNumberNormalized LIKE '82%'
-   OR oemNumberNormalized LIKE '97%'
-GROUP BY prefix2;
-
-
--- ─── §7  articlecriteria HK spec coverage (via correct JOIN) ─────────────
---
--- The `articles.mfrId=0` finding means we CANNOT JOIN via articles.mfrId
--- to manufacturers. Instead we filter articles via articlecrosses
--- (which has HK-prefix normalized OEMs), then look up their specs.
-
-SELECT '─── §7  articlecriteria — global spec distribution ────' AS section;
-
-SELECT
-	criteriaDescription,
-	COUNT(*) AS occurrences
-FROM articlecriteria
-GROUP BY criteriaDescription
-ORDER BY occurrences DESC
-LIMIT 20;
-
-SELECT '─── §7b HK articles with any spec (top prefixes) ──────' AS section;
-
-SELECT
-	'HK articles with any spec' AS check_name,
-	COUNT(DISTINCT ac.legacyArticleId) AS distinct_articles
-FROM articlecriteria ac
-WHERE ac.legacyArticleId IN (
-	SELECT DISTINCT legacyArticleId
-	FROM articlecrosses
-	WHERE oemNumberNormalized LIKE '263%'
-	   OR oemNumberNormalized LIKE '581%'
-	   OR oemNumberNormalized LIKE '821%'
-	   OR oemNumberNormalized LIKE '971%'
-	LIMIT 50000
-);
-
-
--- ─── §8  articlesvehicletrees linkingTargetType distribution ─────────────
---
--- 340M-row table. The app filters on linkingTargetType='P' (Passenger);
--- if HK data uses a different code, that filter would drop everything.
--- Uses row_count as alias (row is reserved in MySQL 8).
-
-SELECT '─── §8  articlesvehicletrees linkingTargetType counts ─' AS section;
-
-SELECT
-	linkingTargetType,
-	COUNT(*) AS row_count
-FROM articlesvehicletrees
-WHERE linkingTargetType IN ('P','V','C','M','A','K','L','H','S','O')
-GROUP BY linkingTargetType
-ORDER BY row_count DESC;
-
-SELECT '─── §8b distinct linkage IDs sampled (10M-row bounded) ─' AS section;
+SELECT '─── §B1 Sampled distinct P linkages (10M cap) ────────' AS section;
 
 SELECT
 	COUNT(DISTINCT sample_id) AS distinct_p_linkages_in_10m_sample
@@ -437,7 +122,7 @@ FROM (
 	LIMIT 10000000
 ) t;
 
-SELECT '─── §8c rows-per-P-linkage sample ─────────────────────' AS section;
+SELECT '─── §B1b Rows-per-P-linkage sample (1000 linkages) ───' AS section;
 
 SELECT
 	AVG(rows_per_linkage) AS avg_rows,
@@ -453,30 +138,30 @@ FROM (
 ) t;
 
 
--- ─── §9  Supersession chain HK coverage ─────────────────────────────────
---
--- SupersessionStrategy in the app returned 0 hits in the 2026-08-24
--- probe. This section confirms whether the tables are empty for HK OEMs
--- or the app's query has a bug.
+-- ─── §B2 Supersession chain HK coverage (memory-safe EXISTS) ────────
 
-SELECT '─── §9  Supersession table totals ─────────────────────' AS section;
+SELECT '─── §B2 Supersession schemas ─────────────────────────' AS section;
 
 SELECT
-	'replacedbyarticles' AS tbl, COUNT(*) AS total_rows FROM replacedbyarticles
-UNION ALL SELECT
-	'replacesarticles',   COUNT(*) FROM replacesarticles;
+	TABLE_NAME,
+	COLUMN_NAME,
+	DATA_TYPE
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name IN ('replacedbyarticles', 'replacesarticles')
+ORDER BY TABLE_NAME, ORDINAL_POSITION;
 
-SELECT '─── §9b Sample replacedbyarticles rows ─────────────────' AS section;
+SELECT '─── §B2b Sample replacedbyarticles rows ──────────────' AS section;
 SELECT * FROM replacedbyarticles LIMIT 5;
 
-SELECT '─── §9c Sample replacesarticles rows ──────────────────' AS section;
+SELECT '─── §B2c Sample replacesarticles rows ────────────────' AS section;
 SELECT * FROM replacesarticles LIMIT 5;
 
-SELECT '─── §9d HK supersession rows via articlecrosses JOIN ──' AS section;
+SELECT '─── §B2d HK supersession rows via articlecrosses JOIN ─' AS section;
 
 SELECT
-	'replacedbyarticles HK (sampled)' AS tbl,
-	COUNT(*)                          AS matched_rows,
+	'replacedbyarticles HK'   AS tbl,
+	COUNT(*)                  AS matched_rows,
 	COUNT(DISTINCT rba.legacyArticleId) AS distinct_articles
 FROM replacedbyarticles rba
 WHERE EXISTS (
@@ -489,8 +174,8 @@ WHERE EXISTS (
 );
 
 SELECT
-	'replacesarticles HK (sampled)' AS tbl,
-	COUNT(*)                        AS matched_rows,
+	'replacesarticles HK'     AS tbl,
+	COUNT(*)                  AS matched_rows,
 	COUNT(DISTINCT ra.legacyArticleId) AS distinct_articles
 FROM replacesarticles ra
 WHERE EXISTS (
@@ -503,12 +188,9 @@ WHERE EXISTS (
 );
 
 
--- ─── §10 linkagetargets + modelseries HK vehicle catalog ─────────────────
---
--- Uses the manuIds confirmed in §4: 183 Hyundai, 184 Kia, 4473 Genesis,
--- 3123 Hyundai(Beijing), 3127 Kia(DYK), 3128 Hyundai(Huatai).
+-- ─── §B3 HK vehicle catalog (uses confirmed manuIds) ─────────────────
 
-SELECT '─── §10 HK models + linkage counts ────────────────────' AS section;
+SELECT '─── §B3 HK models + linkage counts ───────────────────' AS section;
 
 SELECT
 	m.manuName,
@@ -521,7 +203,7 @@ WHERE m.manuId IN (183, 184, 4473, 3123, 3127, 3128)
 GROUP BY m.manuName
 ORDER BY linkage_count DESC;
 
-SELECT '─── §10b Sample Elantra linkage IDs (for audit script) ─' AS section;
+SELECT '─── §B3b Sample Elantra linkage IDs ──────────────────' AS section;
 
 SELECT
 	lt.linkageTargetId,
@@ -539,7 +221,7 @@ WHERE m.manuId = 183
 ORDER BY lt.beginYearMonth DESC
 LIMIT 10;
 
-SELECT '─── §10c Sample Sonata linkage IDs ────────────────────' AS section;
+SELECT '─── §B3c Sample Sonata linkage IDs ───────────────────' AS section;
 
 SELECT
 	lt.linkageTargetId,
@@ -558,13 +240,9 @@ ORDER BY lt.beginYearMonth DESC
 LIMIT 10;
 
 
--- ─── §11 Language distribution ───────────────────────────────────────────
---
--- The app hard-codes `lang='en'` on linkagetargets + ambrand +
--- assemblygroupnodenames. If HK data ships in another language
--- exclusively, the JOIN eliminates everything.
+-- ─── §B4 Language distribution ───────────────────────────────────────
 
-SELECT '─── §11 linkagetargets language coverage ──────────────' AS section;
+SELECT '─── §B4 linkagetargets language coverage ─────────────' AS section;
 
 SELECT 'linkagetargets' AS tbl, lang, COUNT(*) AS row_count
 FROM linkagetargets
@@ -572,7 +250,7 @@ GROUP BY lang
 ORDER BY row_count DESC
 LIMIT 10;
 
-SELECT '─── §11b ambrand language coverage ────────────────────' AS section;
+SELECT '─── §B4b ambrand language coverage ───────────────────' AS section;
 
 SELECT 'ambrand' AS tbl, lang, COUNT(*) AS row_count
 FROM ambrand
@@ -580,32 +258,25 @@ GROUP BY lang
 ORDER BY row_count DESC
 LIMIT 10;
 
-SELECT '─── §11c assemblygroupnodenames total ─────────────────' AS section;
-
-SELECT
-	'assemblygroupnodenames' AS tbl,
-	COUNT(*)                 AS total_rows
-FROM assemblygroupnodenames;
-
 
 -- ═══════════════════════════════════════════════════════════════════════════
---             PART C — THE REAL AFTERMARKET ANSWER
+--         PART C — REAL aftermarket answer (the whole reason we run this)
 -- ═══════════════════════════════════════════════════════════════════════════
-
--- ─── §12 Aftermarket brands per HK prefix (correct JOIN) ─────────────────
 --
--- The CRITICAL section. The 2026-08-26 v1 diagnostic showed top brands
--- on articlecrosses HK prefixes are all car OEMs (Hyundai/Kia/Fiat/etc.)
--- — BUT that column is the cross-refed OEM brand, NOT the aftermarket
--- brand. The REAL aftermarket brand lives at:
+-- Every earlier attempt got misleading answers because articlecrosses.brandName
+-- is the CROSS-REFED OEM brand, not the aftermarket-brand. The REAL aftermarket
+-- brand lives at:
 --
 --   articlecrosses.legacyArticleId
---     → articles.dataSupplierId (NOT mfrId — mfrId is 0 everywhere)
---       → ambrand.brandId (with lang='EN')
+--     → articles.dataSupplierId  (NOT articles.mfrId — mfrId is 0 everywhere)
+--       → ambrand.brandId  (with ambrand.lang='EN')
 --
--- This section does the correct JOIN.
+-- This section does the correct JOIN and gives the definitive answer to
+-- "does the TecDoc dump on this DB have Bosch/MANN/MAHLE/etc. for HK OEMs?"
 
-SELECT '─── §12 REAL aftermarket brands on HK cross-refs ──────' AS section;
+-- ─── §C1 Aftermarket brands per HK prefix (correct JOIN) ────────────
+
+SELECT '─── §C1 REAL aftermarket brands on HK cross-refs ─────' AS section;
 
 SELECT
 	amb.brandName                       AS aftermarket_brand,
@@ -633,18 +304,15 @@ GROUP BY amb.brandName
 ORDER BY crossref_rows DESC
 LIMIT 30;
 
--- ─── §13 Explicit marquee-brand probe ───────────────────────────────────
---
--- Focused answer to "does BOSCH have anything for HK OEMs?" for the
--- top ~30 aftermarket brands the market expects to see.
+-- ─── §C2 Explicit marquee-brand probe ───────────────────────────────
 
-SELECT '─── §13 Explicit marquee-brand probe (HK-only) ────────' AS section;
+SELECT '─── §C2 Marquee brands: BOSCH/MANN/MAHLE/etc. on HK ──' AS section;
 
 SELECT
 	amb.brandName,
 	COUNT(*) AS hk_cross_ref_rows
 FROM ambrand amb
-JOIN articles      a   ON a.dataSupplierId = amb.brandId
+JOIN articles       a   ON a.dataSupplierId = amb.brandId
 JOIN articlecrosses acr ON acr.legacyArticleId = a.legacyArticleId
 WHERE amb.lang = 'EN'
   AND amb.brandName IN (
@@ -664,17 +332,10 @@ ORDER BY hk_cross_ref_rows DESC;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
---             PART D — CORPUS VERIFICATION
+--         PART D — 19-OEM audit corpus verification
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- ─── §14 19-OEM audit corpus temp table ─────────────────────────────────
---
--- The 19 real HK OEMs used in the search-quality audit corpus
--- (scripts/audit/corpus-1500-v2.csv). Bounded to keep temp footprint
--- tiny. Every downstream lookup uses this table so all corpus queries
--- share one memory-resident structure.
-
-SELECT '─── §14 Loading 19-OEM audit corpus temp table ────────' AS section;
+SELECT '─── §D1 Loading 19-OEM audit corpus temp table ───────' AS section;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_corpus;
 CREATE TEMPORARY TABLE tmp_corpus (
@@ -707,9 +368,9 @@ INSERT INTO tmp_corpus (oem, normalized, part_kind) VALUES
 
 SELECT COUNT(*) AS corpus_size FROM tmp_corpus;
 
--- ─── §15 Corpus lookup via oem_number (primary path) ────────────────────
+-- ─── §D2 Corpus lookup via oem_number ──────────────────────────────
 
-SELECT '─── §15 Corpus OEMs via oem_number.clean_number ───────' AS section;
+SELECT '─── §D2 Corpus OEMs via oem_number.clean_number ──────' AS section;
 
 SELECT
 	c.oem,
@@ -721,10 +382,9 @@ LEFT JOIN oem_number on2 ON on2.clean_number = c.normalized
 GROUP BY c.oem, c.part_kind
 ORDER BY c.part_kind, c.oem;
 
+-- ─── §D3 Corpus lookup via articlecrosses + brand diversity ────────
 
--- ─── §16 Corpus lookup via articlecrosses + real aftermarket brands ─────
-
-SELECT '─── §16 Corpus crossref counts + brand diversity ──────' AS section;
+SELECT '─── §D3 Corpus crossref counts + brand diversity ─────' AS section;
 
 SELECT
 	c.oem,
@@ -736,7 +396,9 @@ LEFT JOIN articlecrosses acr ON acr.oemNumberNormalized = c.normalized
 GROUP BY c.oem, c.part_kind
 ORDER BY c.part_kind, c.oem;
 
-SELECT '─── §16b REAL aftermarket brand per corpus OEM ────────' AS section;
+-- ─── §D4 REAL aftermarket brand per corpus OEM (correct JOIN) ──────
+
+SELECT '─── §D4 REAL aftermarket brand per corpus OEM ────────' AS section;
 
 SELECT
 	c.oem,
@@ -751,13 +413,13 @@ JOIN ambrand       amb ON amb.brandId = a.dataSupplierId
 GROUP BY c.oem, c.part_kind, amb.brandName
 ORDER BY c.part_kind, c.oem, rows_for_this_oem_brand DESC;
 
-SELECT '─── §16c aftermarket brands rolled up per part_kind ───' AS section;
+SELECT '─── §D4b Aftermarket brands rolled up per part_kind ──' AS section;
 
 SELECT
 	c.part_kind,
-	amb.brandName                       AS aftermarket_brand,
-	COUNT(DISTINCT c.oem)               AS distinct_corpus_oems_covered,
-	COUNT(*)                            AS total_crossref_rows
+	amb.brandName                 AS aftermarket_brand,
+	COUNT(DISTINCT c.oem)         AS distinct_corpus_oems_covered,
+	COUNT(*)                      AS total_crossref_rows
 FROM tmp_corpus c
 JOIN articlecrosses acr ON acr.oemNumberNormalized = c.normalized
 JOIN articles      a   ON a.legacyArticleId = acr.legacyArticleId
@@ -766,8 +428,9 @@ JOIN ambrand       amb ON amb.brandId = a.dataSupplierId
 GROUP BY c.part_kind, amb.brandName
 ORDER BY c.part_kind, distinct_corpus_oems_covered DESC, total_crossref_rows DESC;
 
--- Spec coverage per corpus OEM (uses sql/07 idx_articlecriteria_legacyArticleId).
-SELECT '─── §16d Spec coverage per corpus OEM ─────────────────' AS section;
+-- ─── §D5 Spec coverage per corpus OEM (validates sql/07 index) ─────
+
+SELECT '─── §D5 Spec coverage per corpus OEM ─────────────────' AS section;
 
 SELECT
 	c.oem,
@@ -784,32 +447,15 @@ DROP TEMPORARY TABLE IF EXISTS tmp_corpus;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════
---             PART E — SAMPLE ROWS (spot-check data shape)
--- ═══════════════════════════════════════════════════════════════════════════
-
-SELECT '─── §17 Sample oem_number rows ────────────────────────' AS section;
-SELECT * FROM oem_number LIMIT 5;
-
-SELECT '─── §17b Sample articlecrosses rows (HK prefix) ───────' AS section;
-SELECT id, oemNumber, oemNumberNormalized, brandName, legacyArticleId, mfrId
-FROM articlecrosses
-WHERE oemNumberNormalized LIKE '58%'
-LIMIT 5;
-
-SELECT '─── §17c Sample linkagetargets rows ───────────────────' AS section;
-SELECT * FROM linkagetargets LIMIT 3;
-
-
--- ═══════════════════════════════════════════════════════════════════════════
---             PART F — QUERY-PLAN VERIFICATION
+--         PART F — EXPLAIN plans (validates every hot query hits an index)
 -- ═══════════════════════════════════════════════════════════════════════════
 --
--- Every EXPLAIN below should show `type=ref` (or better) with a
--- meaningful `key`. When any of them shows `type=ALL` (full table scan)
--- the corresponding sql/06 / sql/07 / sql/08 index is missing → correlate
--- with the pass/fail summary in §2c.
+-- Every EXPLAIN below should show `type=ref` (or better) with a meaningful
+-- `key`. When any of them shows `type=ALL` (full table scan), the
+-- corresponding sql/06 / sql/07 / sql/08 migration is missing.
+-- Correlate with the §A1 pass/fail summary at the top.
 
-SELECT '─── §18 EXPLAIN — articlecriteria FindBySpecMatch ─────' AS section;
+SELECT '─── §F1 EXPLAIN — articlecriteria FindBySpecMatch ────' AS section;
 
 EXPLAIN
 SELECT DISTINCT a.legacyArticleId, a.articleNumber
@@ -819,7 +465,7 @@ WHERE ac.criteriaDescription = 'Thread Size'
   AND ac.rawValue = 'M20 x 1.5'
 LIMIT 10;
 
-SELECT '─── §19 EXPLAIN — articlecriteria FindSpecifications ──' AS section;
+SELECT '─── §F2 EXPLAIN — articlecriteria FindSpecifications ─' AS section;
 
 EXPLAIN
 SELECT criteriaDescription, rawValue
@@ -827,21 +473,21 @@ FROM articlecriteria
 WHERE legacyArticleId = 12345
   AND criteriaDescription IN ('Length [mm]', 'Weight [kg]', 'Height [mm]');
 
-SELECT '─── §20 EXPLAIN — articlecrosses SearchCrossReferences ┈' AS section;
+SELECT '─── §F3 EXPLAIN — articlecrosses SearchCrossReferences ┈' AS section;
 
 EXPLAIN
 SELECT id, oemNumber, brandName, legacyArticleId
 FROM articlecrosses
 WHERE oemNumberNormalized = '263202g000';
 
-SELECT '─── §21 EXPLAIN — oem_number SearchByOEM primary ──────' AS section;
+SELECT '─── §F4 EXPLAIN — oem_number SearchByOEM primary ─────' AS section;
 
 EXPLAIN
 SELECT id, number, articleId
 FROM oem_number
 WHERE clean_number = '263202g000';
 
-SELECT '─── §22 EXPLAIN — articlesvehicletrees PartsForVehicle ┈' AS section;
+SELECT '─── §F5 EXPLAIN — articlesvehicletrees PartsForVehicle ┈' AS section;
 
 EXPLAIN
 SELECT avt.legacyArticleId, avt.assemblyGroupNodeId
@@ -850,7 +496,7 @@ WHERE avt.linkingTargetId = 30001
   AND avt.linkingTargetType = 'P'
 LIMIT 100;
 
-SELECT '─── §23 EXPLAIN — oem_search_index SearchByOEMIndex ───' AS section;
+SELECT '─── §F6 EXPLAIN — oem_search_index SearchByOEMIndex ──' AS section;
 
 EXPLAIN
 SELECT legacyArticleId

@@ -136,21 +136,23 @@ in this exact order, and save the outputs into the report dir:
      mysql --host=<your-tecdoc-mysql> --user=<user> --password --database=<db> \
            < sql/08_articlecriteria_criteria_value_hotfix.sql
 
-  2. Run the consolidated audit + diagnostic (2-8 min):
+  2. Run the consolidated audit + diagnostic (2-4 min):
 
      mysql --host=<your-tecdoc-mysql> --user=<user> --password --database=<db> \
            < scripts/diagnostics/tecdoc_diagnostic_full.sql \
            > $ReportDir\tecdoc-diagnostic-$Timestamp.txt
 
-The consolidated diagnostic answers every audit question in one run:
-  Part A. Environment — table sizes, schema, P0 index PASS/FAIL summary
-  Part B. HK data coverage — oem_number / articlecrosses / articlecriteria /
-          articlesvehicletrees / supersession / vehicle catalog / language
+The optimized diagnostic answers every UNRESOLVED audit question:
+  Part A. sql/08 apply verification (P0 index PASS/FAIL — flips after apply)
+  Part B. Vehicle catalog + supersession + language coverage
   Part C. REAL aftermarket brands via articles.dataSupplierId → ambrand
           (the correct JOIN, not the buggy mfrId) + marquee-brand probe
   Part D. 19-OEM corpus verification — resolve rate, brand diversity, specs
-  Part E. Sample rows for spot-check
   Part F. EXPLAIN plans on hot queries (verifies sql/06+sql/07+sql/08 hit)
+
+(Queries whose answers were already pinned on 2026-08-25/26 runs have been
+removed. If the operator swaps the TecDoc dump, re-run git history commit
+5069e06's version of this file which has the full 23-section baseline.)
 "@
 
 if (-not $SkipDb) {
