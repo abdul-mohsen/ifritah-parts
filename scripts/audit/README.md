@@ -14,11 +14,6 @@ deployed environment. Two-phase workflow:
 Every run stamps its outputs with `yyyy-MM-dd_HHmm` so results are cumulative
 and comparable across deploys.
 
-> **Prefer one-command engine-health check?** See
-> [`scripts/engine-health-check.md`](../engine-health-check.md) — orchestrates
-> this audit + the TecDoc MySQL diagnostic + a delta comparison into a single
-> combined report at `docs/reports/{date}-engine-health/summary.md`.
-
 ## Quick start
 
 ```pwsh
