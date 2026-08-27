@@ -160,6 +160,17 @@ func (s *SmartSearch) SearchWithOptions(query string, linkageTargetId, vehicleCC
 // and forwards them to the browser. Pass nil to get the original behaviour.
 func (s *SmartSearch) SearchWithProgress(query string, linkageTargetId, vehicleCC int, fuelType, category string, page, limit int, mode, enrichmentLevel string, progressCh chan<- ProgressEvent) (*SmartSearchResponse, error) {
 	start := s.now()
+
+	// M6.S2.T2: per-request cost meter. Every DB / external / cache event
+	// on this request records into `meter`; on function exit we merge the
+	// snapshot into DefaultAggregate so /api/debug/cost can surface the
+	// process-lifetime aggregate. Threading is deliberately narrow for
+	// this PR (enrichment + FindAftermarketForOEM). Broader coverage of
+	// the searchByOEM cascade is a follow-up once the wiring pattern is
+	// proven — see docs/ROADMAP.md M6.S2.T2.
+	meter := NewCostMeter()
+	defer func() { DefaultAggregate.Merge(meter.Snapshot()) }()
+
 	var resp *SmartSearchResponse
 	var err error
 
@@ -207,7 +218,11 @@ func (s *SmartSearch) SearchWithProgress(query string, linkageTargetId, vehicleC
 			// deadline on top of whatever ctx is passed in. When the HTTP
 			// handler is ctx-driven in a future refactor, pass its ctx here
 			// so client aborts propagate down.
-			resp.Results = s.enrichResults(context.Background(), resp.Results, enrichmentLevel)
+			//
+			// M6.S2.T2: attach the per-request meter to the ctx so
+			// enrichResults + downstream TecDoc calls can Record*() into it.
+			enrichCtx := WithCostMeter(context.Background(), meter)
+			resp.Results = s.enrichResults(enrichCtx, resp.Results, enrichmentLevel)
 			done(len(resp.Results))
 		}
 	}

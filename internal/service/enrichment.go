@@ -136,10 +136,15 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			articleId := enriched.LegacyArticleId
 			oem := enriched.Part.ArticleNumber
 
+			// M6.S2.T2: retrieve the per-request cost meter from ctx.
+			// nil-safe — every Record* below no-ops when meter is nil.
+			meter := CostMeterFromContext(ctx)
+
 			if articleId == 0 && oem != "" && s.tecdoc != nil && budgetLeft() {
 				// Primary: oem_number table (sparse HK coverage — ~5% of real HK
 				// OEMs per the 2026-08-23 quality audit).
 				refs, err := s.tecdoc.SearchByOEM(oem, 5)
+				meter.RecordDBQuery(0)
 				if err == nil && len(refs) > 0 {
 					for _, ref := range refs {
 						if ref.LegacyArticleId > 0 {
@@ -161,6 +166,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				// enrichment.
 				if articleId == 0 && s.tecDocCrossRef != nil && budgetLeft() {
 					crossRefs, cerr := s.tecDocCrossRef.SearchCrossReferences(oem, 5)
+					meter.RecordDBQuery(0)
 					if cerr == nil && len(crossRefs) > 0 {
 						for _, ref := range crossRefs {
 							if ref.LegacyArticleId > 0 {
@@ -181,6 +187,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				// TecDoc.SearchByOEM's secondary path shape.
 				if articleId == 0 && s.tecdoc != nil && budgetLeft() {
 					idxRefs, ierr := s.tecdoc.SearchByOEMIndex(oem, 5)
+					meter.RecordDBQuery(0)
 					if ierr == nil && len(idxRefs) > 0 {
 						for _, ref := range idxRefs {
 							if ref.LegacyArticleId > 0 {
@@ -196,8 +203,13 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 			// Aftermarket alternatives — works for BOTH articleId paths
 			// AND OEM-string-only paths because FindAftermarketForOEM
 			// queries by OEM string, not by articleId. Always run.
+			//
+			// M6.S2.T2: use the ctx-aware variant so each of the 3-4
+			// internal paths (articlecrosses / oem_number /
+			// oem_search_index / optional online dispatcher) can
+			// Record*() into the request's cost meter.
 			if s.tecdoc != nil && oem != "" && budgetLeft() {
-				if amParts, err := s.tecdoc.FindAftermarketForOEM(oem); err == nil {
+				if amParts, err := s.tecdoc.FindAftermarketForOEMCtx(ctx, oem); err == nil {
 					existing := make(map[string]bool, len(enriched.AftermarketAlternatives))
 					for _, p := range enriched.AftermarketAlternatives {
 						existing[NormalizeBrand(p.Brand)+"|"+strings.ToLower(p.PartNumber)] = true
@@ -231,6 +243,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				} else {
 					log.Printf("[enrichResults] specs id=%d err=%v", articleId, err)
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Always: compatible vehicles
@@ -244,6 +257,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 					}
 					enriched.Compatibility = strs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			if level != "full" {
@@ -255,6 +269,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if docs, err := s.tecDocDocs.FindDocuments(articleId); err == nil {
 					enriched.Documents = docs
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: supersession chain (superseded / successor OEMs).
@@ -325,7 +340,10 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 							if !budgetLeft() {
 								break
 							}
-							amParts, aerr := s.tecdoc.FindAftermarketForOEM(chainOEM)
+							// M6.S2.T2: use ctx-aware variant so
+							// per-path DB queries record into the
+							// request meter.
+							amParts, aerr := s.tecdoc.FindAftermarketForOEMCtx(ctx, chainOEM)
 							if aerr != nil {
 								continue
 							}
@@ -340,6 +358,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 						}
 					}
 				}
+				meter.RecordDBQuery(0)
 			}
 
 			// Full only: functional equivalents (same-fit alternatives)
@@ -347,6 +366,7 @@ func (s *SmartSearch) enrichResults(ctx context.Context, results []SmartResult, 
 				if feq, err := s.tecDocFunctional.FindFunctionalEquivalents(articleId, 0, 20); err == nil {
 					enriched.FunctionalEquivalents = feq
 				}
+				meter.RecordDBQuery(0)
 			}
 		}(i, orig)
 	}
@@ -397,6 +417,9 @@ collectLoop:
 			}
 		}
 		if len(articleIds) > 0 {
+			// M6.S2.T2: single batch query records as one DB event on
+			// the request meter.
+			CostMeterFromContext(ctx).RecordDBQuery(0)
 			specsById, err := s.tecDocSpecs.FindSpecificationsBatch(articleIds)
 			if err != nil {
 				log.Printf("[enrichResults] batch specs err=%v (falling back to skip specs)", err)
