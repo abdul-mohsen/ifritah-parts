@@ -68,6 +68,42 @@ log "starting parts-engine server on ${BIND_ADDR:-0.0.0.0}:${PORT:-8080} ..."
 /app/server &
 APP_PID=$!
 
+# ── First-boot auto-bootstrap ────────────────────────────
+# When hk_parts_cache is empty, load the bundled SQLite dump
+# (/app/data/hk_parts.db) into Postgres via import_legacy_cache. This
+# fills hk_parts_cache + oem_search_index + vehicle_lookup + the
+# platform/bridge/substitution tables in one shot so search actually
+# returns real data on a fresh container.
+#
+# Runs in a background subshell so we don't block the server startup
+# path. Idempotent — the row-count check skips on every boot after the
+# first one, or when an operator has already loaded data.
+(
+    # Wait up to 60s for the server to apply migrations (creates the
+    # target tables). Poll for hk_parts_cache existence rather than a
+    # timer so we don't race a slow migration.
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if PGPASSWORD="${PGPASSWORD:-}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" -Atc "SELECT 1 FROM hk_parts_cache LIMIT 1" >/dev/null 2>&1; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 2
+    done
+
+    CACHE_COUNT=$(PGPASSWORD="${PGPASSWORD:-}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" -Atc "SELECT COUNT(*) FROM hk_parts_cache" 2>/dev/null || echo 0)
+    if [ "${CACHE_COUNT:-0}" -lt 100 ]; then
+        log "bootstrap: hk_parts_cache has ${CACHE_COUNT} rows — importing from ${DATA_DIR:-/app/data}/hk_parts.db"
+        if /app/import_legacy_cache 2>&1 | while IFS= read -r line; do log "  import: $line"; done; then
+            log "bootstrap: import complete"
+        else
+            log "bootstrap: import_legacy_cache failed (non-fatal — server continues)"
+        fi
+    else
+        log "bootstrap: hk_parts_cache has ${CACHE_COUNT} rows — skip"
+    fi
+) &
+
 # Wait for the server. If it exits, tear down postgres and propagate the code.
 wait "${APP_PID}"
 APP_EXIT=$?
