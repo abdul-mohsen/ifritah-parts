@@ -29,7 +29,7 @@ func TestTecDocVehicleFindCompatibleVehicles(t *testing.T) {
 		rows: []compatibleVehicleRow{
 			{
 				LinkageTargetId: 12345,
-				VehicleName:     "TUCSON 2.0 CRDi 4WD",
+				VehicleName:     "HYUNDAI TUCSON (TL) 2.0 CRDi 4WD 136HP [08.2015-]",
 				Make:            "Hyundai",
 				Model:           "TUCSON",
 				BeginYearMonth:  201503,
@@ -41,14 +41,14 @@ func TestTecDocVehicleFindCompatibleVehicles(t *testing.T) {
 			},
 			{
 				LinkageTargetId: 12346,
-				VehicleName:     "SPORTAGE 2.0 CRDi 4WD",
+				VehicleName:     "KIA SPORTAGE IV (QL) 1.6 T-GDI 177HP [07.2018-]",
 				Make:            "Kia",
 				Model:           "SPORTAGE",
 				BeginYearMonth:  201603,
 				EndYearMonth:    0,
-				FuelType:        "Diesel",
-				CapacityCC:      1995,
-				HorsePower:      136,
+				FuelType:        "Petrol",
+				CapacityCC:      1591,
+				HorsePower:      177,
 				CategoryHint:    "Oil filter",
 			},
 		},
@@ -72,6 +72,26 @@ func TestTecDocVehicleFindCompatibleVehicles(t *testing.T) {
 	}
 	if vehicles[0].FitmentDriver == "" {
 		t.Fatalf("FitmentDriver should be classified from category hint")
+	}
+
+	// M3.S2.T2: verify the description parser is wired in — Chassis +
+	// EngineSpec must be populated from the raw description, and the raw
+	// VehicleName must survive untouched for backward compatibility with
+	// existing frontend renderers.
+	if vehicles[0].VehicleName != "HYUNDAI TUCSON (TL) 2.0 CRDi 4WD 136HP [08.2015-]" {
+		t.Fatalf("VehicleName must be preserved verbatim, got %q", vehicles[0].VehicleName)
+	}
+	if vehicles[0].Chassis != "TL" {
+		t.Fatalf("expected Chassis=TL parsed from description, got %q", vehicles[0].Chassis)
+	}
+	if vehicles[0].EngineSpec != "2.0 CRDi 4WD 136HP" {
+		t.Fatalf("expected EngineSpec=%q, got %q", "2.0 CRDi 4WD 136HP", vehicles[0].EngineSpec)
+	}
+	if vehicles[1].Chassis != "QL" {
+		t.Fatalf("expected Chassis=QL for Sportage IV row, got %q", vehicles[1].Chassis)
+	}
+	if vehicles[1].EngineSpec != "1.6 T-GDI 177HP" {
+		t.Fatalf("expected EngineSpec=%q for Sportage IV row, got %q", "1.6 T-GDI 177HP", vehicles[1].EngineSpec)
 	}
 }
 
