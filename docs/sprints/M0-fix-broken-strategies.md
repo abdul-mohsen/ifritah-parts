@@ -160,7 +160,7 @@ The fix is **corpus + catalog wiring**, not strategy code.
 
 ### Task M0.T5 — Test `keyword_gated` on keyword corpus
 
-**Status:** M0.T5 shipped in PR #TBD (2026-08-27) — `scripts/audit/corpus-keywords-v1.csv` (200 rows) + `audit-quality.ps1 -QueryColumn` + `-DryRun` shipped; end-to-end F1 measurement still pending a qa run.
+**Status:** M0.T5 shipped in PR #31 (2026-08-27) — `scripts/audit/corpus-keywords-v1.csv` (200 rows) + `audit-quality.ps1 -QueryColumn` + `-DryRun` shipped; end-to-end F1 measurement still pending a qa run.
 
 **Goal.** `keyword_gated` was designed for keyword queries (`q=oil filter&category=Oil Filter`), not OEM queries. Our audit tested it with OEMs and got 0 hits — that's the expected shape, not a bug. Give it a proper corpus.
 
